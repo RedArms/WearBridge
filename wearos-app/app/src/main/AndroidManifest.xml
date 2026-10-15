@@ -94,6 +94,19 @@
             android:exported="true"
             android:permission="com.google.android.wearable.healthservices.permission.PASSIVE_DATA_BINDING" />
 
+        <!-- Batches from the optional phone relay (Samsung Health), over the Data Layer -->
+        <service
+            android:name=".health.HealthRelayListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:host="*"
+                    android:path="/wearbridge/health/batch"
+                    android:scheme="wear" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

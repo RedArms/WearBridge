@@ -64,3 +64,6 @@ Package.resolved
 *.tmp
 *.bak
 *.orig
+
+# Samsung Health Data SDK (license forbids redistribution; see wearos-app/relay/build.gradle.kts)
+wearos-app/relay/libs/*.aar

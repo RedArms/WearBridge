@@ -10,8 +10,8 @@ struct HealthRecord: Equatable {
     let value: Double
 }
 
-/// Wire format of the Health Data characteristic. Mirrors `HealthProtocol.kt`;
-/// keep both in sync.
+/// Wire format of the Health Data characteristic. Mirrors `HealthProtocol.kt`
+/// (wearos-app/shared); keep both in sync.
 ///
 ///     Batch  := version:u8 (=1) | count:u8 (1...255) | Record × count
 ///     Record := type:u8 | start:u32 | end:u32 | value:f64      (little-endian, 17 bytes)
@@ -20,11 +20,27 @@ enum HealthProtocol {
     static let headerSize = 2
     static let recordSize = 17
 
-    static let typeHeartRate: UInt8 = 1 // beats per minute, instantaneous
-    static let typeSteps: UInt8 = 2     // count over the interval
-    static let typeDistance: UInt8 = 3  // meters over the interval
-    static let typeFloors: UInt8 = 4    // floors climbed over the interval
-    static let typeSleep: UInt8 = 5     // asleep interval, value unused
+    static let typeHeartRate: UInt8 = 1        // beats per minute
+    static let typeSteps: UInt8 = 2            // count over the interval
+    static let typeDistance: UInt8 = 3         // meters over the interval
+    static let typeFloors: UInt8 = 4           // floors climbed over the interval
+    static let typeSleep: UInt8 = 5            // sleep interval, value = sleepStage*
+    static let typeInBed: UInt8 = 6            // whole sleep session, value = sleep score 0...100 (0 = none)
+    static let typeOxygenSaturation: UInt8 = 7 // SpO2 in percent
+    static let typeBloodPressure: UInt8 = 8    // value = systolic * 1000 + diastolic (mmHg)
+
+    static let sleepStageUnspecified = 0 // asleep, stage unknown (watch "asleep" state)
+    static let sleepStageAwake = 1
+    static let sleepStageLight = 2
+    static let sleepStageDeep = 3
+    static let sleepStageREM = 4
+
+    /// (systolic, diastolic) in mmHg from a `typeBloodPressure` value.
+    static func splitBloodPressure(_ value: Double) -> (systolic: Int, diastolic: Int) {
+        guard value.isFinite, value >= 0, value < 1_000_000 else { return (0, 0) }
+        let packed = Int(value)
+        return (packed / 1000, packed % 1000)
+    }
 
     /// Decodes a batch written by the watch. Returns nil if it is malformed or
     /// uses a protocol version this app does not know.

@@ -27,7 +27,7 @@
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>WearBridge needs Bluetooth to be discoverable by your Pixel Watch.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>WearBridge saves heart rate, steps, distance, floors and sleep measured by your watch to Apple Health.</string>
+	<string>WearBridge saves heart rate, steps, distance, floors, sleep, blood oxygen and blood pressure from your watch to Apple Health.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-peripheral</string>

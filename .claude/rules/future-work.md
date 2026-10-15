@@ -10,7 +10,9 @@
 - Only one watch active at a time (BLE limitation with ANCS)
 
 ## Health Data Bridge — follow-ups
-- Shipped: heart rate, steps, distance, floors, asleep periods (see ble-ancs-protocol.md)
+- Shipped: heart rate, steps, distance, floors, asleep periods; with the phone relay: sleep stages + score, SpO2, blood pressure (see ble-ancs-protocol.md)
+- Relay: use the SDK's change queries instead of the 36 h re-read window; SpO2 series data during sleep (currently one value per record)
+- Sleep score updates after the first send are ignored by HealthKit (same sync identifier and version)
 - Workouts (ExerciseClient sessions → HKWorkout with route)
 - Calories: Health Services CALORIES mixes basal + active; needs splitting before mapping to activeEnergyBurned
 - Show pending record count / last sync time on the watch and in the iOS app

@@ -17,6 +17,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am force-stop com.wearos.ancsbridge
 adb shell am start -n com.wearos.ancsbridge/.ui.MainActivity
 
+# Optional phone relay (Samsung Health → watch): needs the Samsung Health Data SDK AAR in relay/libs/
+./gradlew :relay:assembleDebug && adb -s <phone> install -r relay/build/outputs/apk/debug/relay-debug.apk
+
 # Build iOS companion (optional — ANCS works without it)
 cd ios-app && xcodegen generate
 xcodebuild -project AncsBridge.xcodeproj -scheme AncsBridge -sdk iphoneos build
@@ -42,7 +45,7 @@ adb logcat --pid=$(adb shell pidof com.wearos.ancsbridge)
 ## Rules
 
 - [BLE & ANCS Protocol](/.claude/rules/ble-ancs-protocol.md) — connection flow, Telecom calls, channels, icon mapping
-- [Gotchas & Past Bugs](/.claude/rules/gotchas.md) — 18 documented footguns
+- [Gotchas & Past Bugs](/.claude/rules/gotchas.md) — 20 documented footguns
 - [Future Work](/.claude/rules/future-work.md) — full-color icons, multi-device, health follow-ups
 
 ## Verification

@@ -47,6 +47,7 @@ dependencies {
 
     // Health Services (passive heart rate, steps, sleep state for the Health Data Bridge)
     implementation("androidx.health:health-services-client:1.1.0")
+    implementation(project(":shared"))
 
     // Compose for Wear OS
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))

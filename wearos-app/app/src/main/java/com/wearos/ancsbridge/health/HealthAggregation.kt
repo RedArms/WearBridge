@@ -30,7 +30,7 @@ object SleepSessions {
         val start = asleepSinceEpochSec ?: return Update(null, null)
         val duration = atEpochSec - start
         val session = if (duration in MIN_SESSION_SEC..MAX_SESSION_SEC) {
-            HealthRecord(HealthProtocol.TYPE_SLEEP, start, atEpochSec, 0.0)
+            HealthRecord(HealthProtocol.TYPE_SLEEP, start, atEpochSec, HealthProtocol.SLEEP_STAGE_UNSPECIFIED.toDouble())
         } else null
         return Update(null, session)
     }

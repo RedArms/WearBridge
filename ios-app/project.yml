@@ -17,7 +17,7 @@ targets:
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: "WearBridge needs Bluetooth to connect to your Pixel Watch and forward notifications."
         NSBluetoothPeripheralUsageDescription: "WearBridge needs Bluetooth to be discoverable by your Pixel Watch."
-        NSHealthUpdateUsageDescription: "WearBridge saves heart rate, steps, distance, floors and sleep measured by your watch to Apple Health."
+        NSHealthUpdateUsageDescription: "WearBridge saves heart rate, steps, distance, floors, sleep, blood oxygen and blood pressure from your watch to Apple Health."
         UIBackgroundModes:
           - bluetooth-peripheral
         UILaunchScreen: {}

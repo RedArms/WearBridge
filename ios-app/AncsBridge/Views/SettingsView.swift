@@ -48,7 +48,7 @@ struct SettingsView: View {
                         Label {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Apple Health")
-                                Text("Save heart rate, steps, distance, floors and sleep from the watch. Turn on Health Sync on the watch too.")
+                                Text("Save heart rate, steps, distance, floors and sleep from the watch, plus sleep stages, blood oxygen and blood pressure with the phone relay. Turn on Health Sync on the watch too.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -92,6 +92,8 @@ struct SettingsView: View {
             .onAppear {
                 liveCallStatusEnabled = viewModel.peripheralManager.settingsStore.liveCallStatus
                 healthSyncEnabled = viewModel.peripheralManager.settingsStore.healthSync
+                // Ask for any data types added since the user last granted access.
+                viewModel.peripheralManager.refreshHealthAuthorization()
             }
         }
     }

@@ -19,3 +19,10 @@ dependencyResolutionManagement {
 
 rootProject.name = "WearOS-ANCS-Bridge"
 include(":app")
+include(":shared") // Health Data Bridge wire format, shared with the relay
+
+// Optional phone app: Samsung Health (sleep stages, SpO2, blood pressure) → watch.
+// Built only once the Samsung Health Data SDK AAR is in relay/libs/ (not redistributable).
+if (file("relay/libs").listFiles()?.any { it.name.endsWith(".aar") } == true) {
+    include(":relay")
+}

@@ -56,6 +56,9 @@ final class HealthKitWriter {
             HKQuantityType(.distanceWalkingRunning),
             HKQuantityType(.flightsClimbed),
             HKCategoryType(.sleepAnalysis),
+            HKQuantityType(.oxygenSaturation),
+            HKQuantityType(.bloodPressureSystolic),
+            HKQuantityType(.bloodPressureDiastolic),
         ]
     }
 
@@ -162,7 +165,8 @@ final class HealthKitWriter {
         let count = min(bytes.count / HealthProtocol.recordSize, Self.maxRecordsPerSave)
         guard count > 0 else { return }
 
-        let samples = HealthProtocol.decodeRecords(bytes, count: count).compactMap(Self.makeSample)
+        let records = HealthProtocol.decodeRecords(bytes, count: count)
+        let samples = records.compactMap(Self.makeSample)
         guard !samples.isEmpty else {
             removeStaged(count: count) // nothing usable in this chunk
             flushOnQueue()
@@ -170,6 +174,26 @@ final class HealthKitWriter {
         }
 
         isFlushing = true
+        let sessions = Self.sleepSessionRanges(records)
+        guard !sessions.isEmpty else {
+            save(samples, stagedCount: count)
+            return
+        }
+        // Samsung Health sleep (from the phone relay) replaces the watch's basic
+        // "asleep" samples for the same nights.
+        deleteBasicSleep(overlapping: sessions) { [weak self] mustRetry in
+            guard let self else { return }
+            if mustRetry {
+                self.isFlushing = false
+                self.logger.info("HealthKit not writable now; keeping \(count) staged records")
+            } else {
+                self.save(samples, stagedCount: count)
+            }
+        }
+    }
+
+    /// Saves one chunk of staged samples. Runs on `queue` with `isFlushing` set.
+    private func save(_ samples: [HKSample], stagedCount count: Int) {
         healthStore.save(samples) { [weak self] success, error in
             guard let self else { return }
             self.queue.async {
@@ -184,6 +208,38 @@ final class HealthKitWriter {
                 }
             }
         }
+    }
+
+    /// Deletes this app's stage-less "asleep" samples within the given sleep sessions.
+    /// `completion` runs on `queue`; true means HealthKit was not writable.
+    private func deleteBasicSleep(overlapping sessions: [ClosedRange<Date>], completion: @escaping (Bool) -> Void) {
+        let group = DispatchGroup()
+        var mustRetry = false
+        for session in sessions {
+            let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                HKQuery.predicateForSamples(withStart: session.lowerBound, end: session.upperBound, options: []),
+                HKQuery.predicateForCategorySamples(with: .equalTo, value: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue),
+            ])
+            group.enter()
+            healthStore.deleteObjects(of: HKCategoryType(.sleepAnalysis), predicate: predicate) { success, deleted, error in
+                self.queue.async {
+                    if success, deleted > 0 {
+                        self.logger.info("Replaced \(deleted) basic sleep samples with staged sleep")
+                    } else if !success, Self.isRetryable(error) {
+                        mustRetry = true
+                    }
+                    group.leave()
+                }
+            }
+        }
+        group.notify(queue: queue) { completion(mustRetry) }
+    }
+
+    /// Sleep sessions (in-bed records) in a chunk, which come from the phone relay.
+    static func sleepSessionRanges(_ records: [HealthRecord]) -> [ClosedRange<Date>] {
+        records
+            .filter { $0.type == HealthProtocol.typeInBed && $0.end > $0.start }
+            .map { Date(timeIntervalSince1970: TimeInterval($0.start))...Date(timeIntervalSince1970: TimeInterval($0.end)) }
     }
 
     private func saveIndividually(_ samples: [HKSample], stagedCount: Int) {
@@ -233,6 +289,20 @@ final class HealthKitWriter {
 
     // MARK: - Mapping
 
+    /// Samsung Health sleep score (0...100), stored on the "In Bed" sample. Health doesn't display it.
+    static let sleepScoreMetadataKey = "WearBridgeSleepScore"
+
+    static func sleepAnalysisValue(forStage stage: Double) -> HKCategoryValueSleepAnalysis? {
+        switch stage {
+        case Double(HealthProtocol.sleepStageUnspecified): return .asleepUnspecified
+        case Double(HealthProtocol.sleepStageAwake): return .awake
+        case Double(HealthProtocol.sleepStageLight): return .asleepCore
+        case Double(HealthProtocol.sleepStageDeep): return .asleepDeep
+        case Double(HealthProtocol.sleepStageREM): return .asleepREM
+        default: return nil
+        }
+    }
+
     static func syncIdentifier(for record: HealthRecord) -> String {
         "\(syncIdentifierPrefix).\(record.type).\(record.start).\(record.end)"
     }
@@ -268,12 +338,57 @@ final class HealthKitWriter {
         case HealthProtocol.typeFloors:
             return quantity(.flightsClimbed, .count())
         case HealthProtocol.typeSleep:
-            guard record.end > record.start else { return nil }
+            guard record.end > record.start, let stage = sleepAnalysisValue(forStage: record.value) else { return nil }
             return HKCategorySample(
                 type: HKCategoryType(.sleepAnalysis),
-                value: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue,
+                value: stage.rawValue,
                 start: start,
                 end: end,
+                metadata: metadata
+            )
+        case HealthProtocol.typeInBed:
+            guard record.end > record.start, record.value <= 100 else { return nil }
+            var inBedMetadata = metadata
+            if record.value > 0 {
+                inBedMetadata[sleepScoreMetadataKey] = Int(record.value)
+            }
+            return HKCategorySample(
+                type: HKCategoryType(.sleepAnalysis),
+                value: HKCategoryValueSleepAnalysis.inBed.rawValue,
+                start: start,
+                end: end,
+                metadata: inBedMetadata
+            )
+        case HealthProtocol.typeOxygenSaturation:
+            guard record.value > 0, record.value <= 100 else { return nil }
+            return HKQuantitySample(
+                type: HKQuantityType(.oxygenSaturation),
+                quantity: HKQuantity(unit: .percent(), doubleValue: record.value / 100), // HealthKit percent is 0...1
+                start: start,
+                end: end,
+                metadata: metadata
+            )
+        case HealthProtocol.typeBloodPressure:
+            let (systolic, diastolic) = HealthProtocol.splitBloodPressure(record.value)
+            guard systolic > 0, diastolic > 0 else { return nil }
+            let identifier = syncIdentifier(for: record)
+            func component(_ type: HKQuantityTypeIdentifier, _ mmHg: Int, _ suffix: String) -> HKQuantitySample {
+                HKQuantitySample(
+                    type: HKQuantityType(type),
+                    quantity: HKQuantity(unit: .millimeterOfMercury(), doubleValue: Double(mmHg)),
+                    start: start,
+                    end: end,
+                    metadata: [HKMetadataKeySyncIdentifier: "\(identifier).\(suffix)", HKMetadataKeySyncVersion: 1]
+                )
+            }
+            return HKCorrelation(
+                type: HKCorrelationType(.bloodPressure),
+                start: start,
+                end: end,
+                objects: [
+                    component(.bloodPressureSystolic, systolic, "systolic"),
+                    component(.bloodPressureDiastolic, diastolic, "diastolic"),
+                ],
                 metadata: metadata
             )
         default:

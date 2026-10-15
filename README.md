@@ -54,7 +54,7 @@ ANCS is a system-level BLE service built into iOS. Any bonded BLE accessory can 
 ## Project Structure
 
 ```
-├── wearos-app/          # Wear OS app (Kotlin, Jetpack Compose)
+├── wearos-app/          # Wear OS app (Kotlin, Jetpack Compose) + shared/ wire format + optional relay/ phone app
 │   └── app/src/main/java/com/wearos/ancsbridge/
 │       ├── ble/         # BLE scanning, connection, GATT callbacks
 │       ├── ancs/        # ANCS protocol, service, Telecom ConnectionService
@@ -104,7 +104,18 @@ Open `ios-app/AncsBridge.xcodeproj` in Xcode and build. The companion app provid
 2. In the iOS companion app, open **Settings → Apple Health** and allow WearBridge to write the requested types.
 3. The watch queues data while the iPhone is away and sends it in batches when connected. The iPhone stages batches on disk and saves them to Apple Health once it is unlocked.
 
-What syncs, when the watch supports it: heart rate, steps, walking + running distance, flights climbed and sleep. Sleep comes from Health Services' "asleep" activity state, so it shows up as *Asleep* without stages (no deep/REM). ECG, blood pressure and SpO2 are not available to third-party apps through Health Services.
+What syncs, when the watch supports it: heart rate, steps, walking + running distance, flights climbed and sleep. On its own, the watch only knows the "asleep" activity state, so sleep shows up as *Asleep* without stages.
+
+#### Phone relay for Samsung watches (sleep stages, SpO2, blood pressure)
+
+If your Galaxy Watch is also paired with an Android phone running Samsung Health (kept at home is fine), the optional relay app adds what Samsung Health measured: sleep with stages (awake, light → Core, deep, REM) and score, blood oxygen, blood pressure (calibrated with Samsung Health Monitor) and heart rate. It replaces the watch's basic sleep for the same nights.
+
+1. Download the [Samsung Health Data SDK](https://developer.samsung.com/health/data) and put its AAR in `wearos-app/relay/libs/` (its license doesn't allow committing it).
+2. In Samsung Health on the phone: Settings → About Samsung Health → tap the version 10 times → **Developer mode (Samsung Health Data SDK)** → on.
+3. `cd wearos-app && ./gradlew :relay:assembleDebug`, install `relay-debug.apk` on the phone, open **WearBridge Relay** and tap **Grant Samsung Health access**. Build it on the same machine as the watch app: both must share the application ID and signing key.
+4. The relay syncs hourly through the watch, which forwards to the iPhone as above.
+
+Apple Health doesn't let third-party apps write ECG or skin temperature, so those stay in Samsung Health.
 
 The companion app needs the HealthKit capability. If your Apple account can't sign apps with HealthKit, remove the two `healthkit` keys from `AncsBridge.entitlements`; everything else keeps working.
 
@@ -126,7 +137,7 @@ Unknown apps fall back to category-based icons (phone for calls, envelope for em
 - [ ] **Quick Reply BLE Transport** — Wire decline-with-message text to iOS companion app via custom BLE characteristic
 - [ ] **App Icon Support** — Expand to full-color Play Store PNGs as `largeIcon`
 - [ ] **Multi-Device Pairing** — Support switching between multiple Wear OS watches
-- [x] **Health Data Bridge** — Heart rate, steps, distance, floors and sleep from Health Services to HealthKit over BLE
+- [x] **Health Data Bridge** — Heart rate, steps, distance, floors and sleep from Health Services to HealthKit over BLE; optional phone relay adds Samsung Health sleep stages, SpO2 and blood pressure
 
 ## Contributing
 

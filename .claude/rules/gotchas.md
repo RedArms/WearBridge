@@ -35,3 +35,7 @@
 17. **One GATT operation at a time**: `BluetoothGatt.write*`/`read*` return false while another operation is in flight. Health sync writes share the link with ANCS Control Point writes, so Control Point writes are retried briefly (`writeControlPointWithRetry`) and health writes back off on `BUSY`.
 
 18. **Health Services forgets passive registrations on reboot**: `HealthMonitoring.registerIfEnabled()` runs on every `AncsService` start (which `BootReceiver` triggers). HealthKit is also unwritable while the iPhone is locked, hence the on-disk staging in `HealthKitWriter`.
+
+19. **Data Layer needs identical apps**: the watch app and the phone relay only see each other's messages if they share the application ID (`com.wearos.ancsbridge`) and signing certificate. Build both from the same machine/keystore.
+
+20. **Samsung Health developer mode turns itself off**: after some Samsung Health updates, the relay fails with `ERR_ACCESS_CONTROL` until developer mode is switched on again (Samsung Health → About → tap version 10×).

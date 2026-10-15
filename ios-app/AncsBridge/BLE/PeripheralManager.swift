@@ -106,6 +106,15 @@ class PeripheralManager: NSObject, ObservableObject {
         }
     }
 
+    /// When sync is on, request access to data types added in newer versions.
+    /// HealthKit only shows its sheet if some type is still undetermined.
+    func refreshHealthAuthorization() {
+        guard settingsStore.healthSync else { return }
+        healthWriter.requestAuthorization { [weak self] _ in
+            self?.healthWriter.flush()
+        }
+    }
+
     /// Push call state to all subscribed watches via BLE notification.
     private func notifyCallState(_ state: UInt8) {
         guard let char = callStateCharacteristic else { return }

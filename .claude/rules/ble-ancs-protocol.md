@@ -68,7 +68,7 @@ When a call is answered on the iPhone, the watch overlay transitions from "Incom
 
 ## Health Data Bridge
 
-Opt-in on both sides: **Health Sync** on the watch, **Settings → Apple Health** in the iOS app.
+Opt-in on both sides: **Health Sync** on the watch, **Settings → Apple Health** in the iOS app. Optionally, the phone relay (`wearos-app/relay`) on the Android phone the watch is paired with adds Samsung Health data.
 
 1. Watch: `HealthMonitoring` registers `HealthPassiveListenerService` with Health Services (heart rate, steps, distance, floors, "asleep" activity state). Registration is redone on every `AncsService` start because Health Services forgets it on reboot.
 2. Watch: records go to `HealthRecordStore`, a fixed-record file queue (`health_queue.bin`, capped at 50k records).
@@ -81,12 +81,28 @@ Wire format (little-endian), mirrored in `HealthProtocol.kt` / `HealthProtocol.s
 ```
 Batch  := version:u8 (=1) | count:u8 (1..255) | Record × count
 Record := type:u8 | start:u32 (Unix s) | end:u32 (Unix s) | value:f64     (17 bytes)
-type   := 1 heart rate (bpm, start == end) | 2 steps | 3 distance (m) | 4 floors | 5 asleep interval
+type   := 1 heart rate (bpm) | 2 steps | 3 distance (m) | 4 floors
+        | 5 sleep (value = stage: 0 unspecified, 1 awake, 2 light, 3 deep, 4 REM)
+        | 6 in bed (whole session, value = sleep score 0..100, 0 = none)
+        | 7 SpO2 (%) | 8 blood pressure (value = systolic * 1000 + diastolic, mmHg)
 ```
+
+HealthKit mapping: 5 → sleepAnalysis asleepUnspecified/awake/asleepCore/asleepDeep/asleepREM, 6 → inBed (score in `WearBridgeSleepScore` metadata), 7 → oxygenSaturation (fraction), 8 → bloodPressure correlation (systolic + diastolic). HealthKit can't take skin temperature (`appleSleepingWristTemperature` is read-only) or ECG from third-party apps.
 
 Every HealthKit sample gets `HKMetadataKeySyncIdentifier = wearbridge.<type>.<start>.<end>` (version 1), so batches resent after a lost acknowledgement are not duplicated.
 
 If the watch only offers `*_DAILY` totals passively, `DailyTotals` turns them into increments. Sleep periods shorter than 10 min or longer than 24 h are dropped (`SleepSessions`).
+
+### Phone relay (Samsung Health)
+
+Health Services only exposes an "asleep" state. Samsung Health on the paired Android phone has the full picture, readable through the Samsung Health Data SDK in Samsung Health's developer mode (personal use, read-only, no partner registration).
+
+1. `:relay` (phone, same applicationId `com.wearos.ancsbridge` and signing key as the watch app, which the Data Layer requires) reads sleep (sessions, stages, score), SpO2, blood pressure (+ pulse) and heart rate. `RelayWorker` runs hourly via WorkManager, re-reading 36 h before the last success (30 days on the first run); `SentLog` skips records sent in the last 24 h.
+2. Batches (same wire format, ≤255 records) go to the watch with `MessageClient` on path `/wearbridge/health/batch`.
+3. Watch: `HealthRelayListenerService` appends them to the same queue, so they reach the iPhone over the existing BLE link. While the relay is active (data in the last 7 days), the watch stops sending its own basic sleep.
+4. iPhone: before saving a chunk with in-bed sessions, `HealthKitWriter` deletes its own `asleepUnspecified` samples inside those sessions, so staged sleep replaces basic sleep.
+
+The relay module is only included in the Gradle build when the SDK AAR is in `wearos-app/relay/libs/` (not redistributable, gitignored). The `:shared` module holds `HealthProtocol` for both apps.
 
 ## Quick Reply Flow
 

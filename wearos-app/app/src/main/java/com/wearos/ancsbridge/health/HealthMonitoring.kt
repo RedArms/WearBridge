@@ -42,6 +42,10 @@ object HealthMonitoring {
     private const val KEY_ENABLED = "enabled"
     private const val KEY_ASLEEP_SINCE = "asleep_since"
     private const val KEY_DAILY_PREFIX = "daily_total_"
+    private const val KEY_RELAY_LAST_SEEN = "relay_last_seen"
+
+    /** While the phone relay sent data this recently, its staged sleep replaces the watch's basic sleep. */
+    private const val RELAY_ACTIVE_WINDOW_MS = 7 * 24 * 3600 * 1000L
     private const val QUEUE_FILE = "health_queue.bin"
     private const val MAX_PLAUSIBLE_BPM = 300.0
 
@@ -221,9 +225,29 @@ object HealthMonitoring {
             update.session
         }
         if (session != null) {
-            Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec}")
-            queue(context, listOf(session))
+            if (isRelayActive(context)) {
+                // Samsung Health's staged sleep comes through the relay; don't add a second, coarser copy.
+                Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec} skipped (relay active)")
+            } else {
+                Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec}")
+                queue(context, listOf(session))
+            }
         }
+    }
+
+    /** Records sent by the phone relay (Samsung Health), see HealthRelayListenerService. */
+    fun onRelayRecords(context: Context, records: List<HealthRecord>) {
+        prefs(context).edit().putLong(KEY_RELAY_LAST_SEEN, System.currentTimeMillis()).apply()
+        if (!isEnabled(context)) {
+            Log.w(TAG, "Dropping ${records.size} relay records: Health Sync is off on the watch")
+            return
+        }
+        queue(context, records)
+    }
+
+    fun isRelayActive(context: Context): Boolean {
+        val lastSeen = prefs(context).getLong(KEY_RELAY_LAST_SEEN, 0L)
+        return lastSeen > 0L && System.currentTimeMillis() - lastSeen < RELAY_ACTIVE_WINDOW_MS
     }
 
     fun onPermissionLost(context: Context) {

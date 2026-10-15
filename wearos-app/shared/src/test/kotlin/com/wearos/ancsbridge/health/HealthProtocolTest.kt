@@ -58,6 +58,28 @@ class HealthProtocolTest {
     }
 
     @Test
+    fun `type specific values are checked`() {
+        fun r(type: Int, value: Double) = HealthRecord(type, 1_000, 1_060, value)
+        assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, HealthProtocol.SLEEP_STAGE_REM.toDouble())))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, 5.0)))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, 1.5)))
+        assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_IN_BED, 82.0)))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_IN_BED, 101.0)))
+        assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_OXYGEN_SATURATION, 96.5)))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_OXYGEN_SATURATION, 0.0)))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_OXYGEN_SATURATION, 120.0)))
+        assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_BLOOD_PRESSURE, HealthProtocol.bloodPressureValue(121.4, 79.6))))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_BLOOD_PRESSURE, 120.0))) // diastolic only
+    }
+
+    @Test
+    fun `blood pressure packs into one value`() {
+        val value = HealthProtocol.bloodPressureValue(121.4, 79.6)
+        assertEquals(121_080.0, value, 0.0)
+        assertEquals(121 to 80, HealthProtocol.splitBloodPressure(value))
+    }
+
+    @Test
     fun `maxRecordsPerWrite fits the MTU`() {
         assertEquals(1, HealthProtocol.maxRecordsPerWrite(23))   // BLE default MTU
         assertEquals(10, HealthProtocol.maxRecordsPerWrite(185)) // common iPhone MTU
