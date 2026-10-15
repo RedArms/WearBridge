@@ -1,0 +1,283 @@
+import Foundation
+import HealthKit
+import UIKit
+import os.log
+
+/// Saves health records received from the watch into Apple Health.
+///
+/// HealthKit can't be written while the iPhone is locked, and the watch mostly
+/// syncs in the background. So a BLE write is acknowledged as soon as its
+/// records are staged on disk, and staged records are saved to HealthKit when
+/// it becomes reachable: right away if possible, otherwise on unlock, when the
+/// app comes to the foreground, or with the next batch from the watch.
+///
+/// Every sample carries a sync identifier derived from its type and interval,
+/// so a batch the watch resends after a lost acknowledgement is not duplicated.
+final class HealthKitWriter {
+
+    static let syncIdentifierPrefix = "wearbridge"
+
+    /// Same cap as the watch-side queue; the oldest records go first.
+    private static let maxStagedRecords = 50_000
+    private static let maxRecordsPerSave = 1_000
+
+    private let logger = Logger(subsystem: "com.wearos.ancsbridge", category: "HealthKitWriter")
+    private let healthStore = HKHealthStore()
+    private let queue = DispatchQueue(label: "com.wearos.ancsbridge.health")
+    private let stagingURL: URL
+    private let isEnabled: () -> Bool
+    private var isFlushing = false
+    private var observers: [NSObjectProtocol] = []
+
+    init(isEnabled: @escaping () -> Bool) {
+        self.isEnabled = isEnabled
+        let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        stagingURL = supportDirectory.appendingPathComponent("health-staging.bin")
+
+        let center = NotificationCenter.default
+        for name in [UIApplication.protectedDataDidBecomeAvailableNotification, UIApplication.didBecomeActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+                self?.flush()
+            })
+        }
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    static var isHealthDataAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
+
+    /// The types WearBridge writes. It never reads Health data.
+    static var shareTypes: Set<HKSampleType> {
+        [
+            HKQuantityType(.heartRate),
+            HKQuantityType(.stepCount),
+            HKQuantityType(.distanceWalkingRunning),
+            HKQuantityType(.flightsClimbed),
+            HKCategoryType(.sleepAnalysis),
+        ]
+    }
+
+    /// Shows the Health permission sheet. `completion` runs on the main queue.
+    func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        guard Self.isHealthDataAvailable else {
+            completion(false)
+            return
+        }
+        healthStore.requestAuthorization(toShare: Self.shareTypes, read: nil) { [weak self] success, error in
+            if let error {
+                self?.logger.error("HealthKit authorization failed: \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async { completion(success) }
+        }
+    }
+
+    // MARK: - Staging
+
+    /// Durably stages records from the watch. Returns false if they could not be
+    /// written, in which case the watch keeps them and retries later.
+    func stage(_ records: [HealthRecord]) -> Bool {
+        queue.sync {
+            do {
+                try appendToStaging(HealthProtocol.encodeRecords(records))
+                return true
+            } catch {
+                logger.error("Failed to stage \(records.count) health records: \(error.localizedDescription)")
+                return false
+            }
+        }
+    }
+
+    /// Drops staged records, e.g. when the user turns the sync off.
+    func discardStaged() {
+        queue.async {
+            try? FileManager.default.removeItem(at: self.stagingURL)
+        }
+    }
+
+    private func appendToStaging(_ data: Data) throws {
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: stagingURL.path) {
+            try fileManager.createDirectory(at: stagingURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Writable while locked (after the first unlock since boot), so background BLE writes can be staged.
+            try Data().write(to: stagingURL, options: .completeFileProtectionUntilFirstUserAuthentication)
+        }
+        let handle = try FileHandle(forWritingTo: stagingURL)
+        defer { try? handle.close() }
+        let length = try handle.seekToEnd()
+        let partial = length % UInt64(HealthProtocol.recordSize)
+        if partial != 0 {
+            // Drop a torn record left by an interrupted write so later records stay aligned.
+            try handle.truncate(atOffset: length - partial)
+            try handle.seekToEnd()
+        }
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+
+        // Trimming while a save is in flight would shift the records it is about to remove.
+        if !isFlushing {
+            trimStagingIfNeeded()
+        }
+    }
+
+    private func stagedBytes() -> [UInt8] {
+        guard let data = try? Data(contentsOf: stagingURL) else { return [] }
+        return [UInt8](data)
+    }
+
+    private func removeStaged(count: Int) {
+        let bytes = stagedBytes()
+        let removeBytes = min(count * HealthProtocol.recordSize, bytes.count)
+        let remaining = Data(bytes[removeBytes...])
+        do {
+            if remaining.count < HealthProtocol.recordSize {
+                try? FileManager.default.removeItem(at: stagingURL)
+            } else {
+                try remaining.write(to: stagingURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            }
+        } catch {
+            logger.error("Failed to update health staging file: \(error.localizedDescription)")
+        }
+    }
+
+    private func trimStagingIfNeeded() {
+        let bytes = stagedBytes()
+        let count = bytes.count / HealthProtocol.recordSize
+        guard count > Self.maxStagedRecords else { return }
+        removeStaged(count: count - Self.maxStagedRecords)
+        logger.warning("Health staging full; dropped \(count - Self.maxStagedRecords) oldest records")
+    }
+
+    // MARK: - Saving to HealthKit
+
+    /// Saves staged records to HealthKit if it is reachable. Safe to call often.
+    func flush() {
+        queue.async { self.flushOnQueue() }
+    }
+
+    private func flushOnQueue() {
+        guard !isFlushing, isEnabled(), Self.isHealthDataAvailable else { return }
+        let bytes = stagedBytes()
+        let count = min(bytes.count / HealthProtocol.recordSize, Self.maxRecordsPerSave)
+        guard count > 0 else { return }
+
+        let samples = HealthProtocol.decodeRecords(bytes, count: count).compactMap(Self.makeSample)
+        guard !samples.isEmpty else {
+            removeStaged(count: count) // nothing usable in this chunk
+            flushOnQueue()
+            return
+        }
+
+        isFlushing = true
+        healthStore.save(samples) { [weak self] success, error in
+            guard let self else { return }
+            self.queue.async {
+                if success {
+                    self.finishSave(removing: count, saved: samples.count)
+                } else if Self.isRetryable(error) {
+                    self.isFlushing = false
+                    self.logger.info("HealthKit not writable now (\(error?.localizedDescription ?? "unknown")); keeping \(count) staged records")
+                } else {
+                    // One bad sample fails the whole batch; save one by one and drop the rejects.
+                    self.saveIndividually(samples, stagedCount: count)
+                }
+            }
+        }
+    }
+
+    private func saveIndividually(_ samples: [HKSample], stagedCount: Int) {
+        let group = DispatchGroup()
+        var saved = 0
+        var mustRetry = false
+        for sample in samples {
+            group.enter()
+            healthStore.save(sample) { success, error in
+                self.queue.async {
+                    if success {
+                        saved += 1
+                    } else if Self.isRetryable(error) {
+                        mustRetry = true
+                    } else {
+                        self.logger.error("Dropping health sample \(sample.sampleType.identifier): \(error?.localizedDescription ?? "unknown")")
+                    }
+                    group.leave()
+                }
+            }
+        }
+        group.notify(queue: queue) {
+            if mustRetry {
+                self.isFlushing = false
+            } else {
+                self.finishSave(removing: stagedCount, saved: saved)
+            }
+        }
+    }
+
+    private func finishSave(removing count: Int, saved: Int) {
+        removeStaged(count: count)
+        isFlushing = false
+        logger.info("Saved \(saved) health samples to HealthKit")
+        flushOnQueue() // continue with the next chunk, if any
+    }
+
+    private static func isRetryable(_ error: Error?) -> Bool {
+        guard let error = error as? HKError else { return false }
+        switch error.code {
+        case .errorDatabaseInaccessible, .errorAuthorizationDenied, .errorAuthorizationNotDetermined:
+            return true
+        default:
+            return false
+        }
+    }
+
+    // MARK: - Mapping
+
+    static func syncIdentifier(for record: HealthRecord) -> String {
+        "\(syncIdentifierPrefix).\(record.type).\(record.start).\(record.end)"
+    }
+
+    /// Converts a record into the matching HealthKit sample, or nil if it can't be represented.
+    static func makeSample(_ record: HealthRecord) -> HKSample? {
+        guard record.end >= record.start, record.value.isFinite, record.value >= 0 else { return nil }
+        let start = Date(timeIntervalSince1970: TimeInterval(record.start))
+        let end = Date(timeIntervalSince1970: TimeInterval(record.end))
+        let metadata: [String: Any] = [
+            HKMetadataKeySyncIdentifier: syncIdentifier(for: record),
+            HKMetadataKeySyncVersion: 1,
+        ]
+
+        func quantity(_ identifier: HKQuantityTypeIdentifier, _ unit: HKUnit) -> HKSample {
+            HKQuantitySample(
+                type: HKQuantityType(identifier),
+                quantity: HKQuantity(unit: unit, doubleValue: record.value),
+                start: start,
+                end: end,
+                metadata: metadata
+            )
+        }
+
+        switch record.type {
+        case HealthProtocol.typeHeartRate:
+            guard record.value > 0 else { return nil }
+            return quantity(.heartRate, HKUnit.count().unitDivided(by: .minute()))
+        case HealthProtocol.typeSteps:
+            return quantity(.stepCount, .count())
+        case HealthProtocol.typeDistance:
+            return quantity(.distanceWalkingRunning, .meter())
+        case HealthProtocol.typeFloors:
+            return quantity(.flightsClimbed, .count())
+        case HealthProtocol.typeSleep:
+            guard record.end > record.start else { return nil }
+            return HKCategorySample(
+                type: HKCategoryType(.sleepAnalysis),
+                value: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue,
+                start: start,
+                end: end,
+                metadata: metadata
+            )
+        default:
+            return nil
+        }
+    }
+}

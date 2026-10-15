@@ -64,6 +64,29 @@ When a call is answered on the iPhone, the watch overlay transitions from "Incom
 | Connection Status | `A0E3D5B2-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Read/Notify — watch reads to signal connection |
 | Quick Reply | `A0E3D5B3-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Write — watch sends `"callerName\|replyText"` |
 | Call State | `A0E3D5B4-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Read/Notify — iPhone pushes call state (0x00=idle, 0x01=ringing, 0x02=active, 0x03=ended) |
+| Health Data | `A0E3D5B5-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Write (encryption required) — watch sends health record batches |
+
+## Health Data Bridge
+
+Opt-in on both sides: **Health Sync** on the watch, **Settings → Apple Health** in the iOS app.
+
+1. Watch: `HealthMonitoring` registers `HealthPassiveListenerService` with Health Services (heart rate, steps, distance, floors, "asleep" activity state). Registration is redone on every `AncsService` start because Health Services forgets it on reboot.
+2. Watch: records go to `HealthRecordStore`, a fixed-record file queue (`health_queue.bin`, capped at 50k records).
+3. Watch: `HealthSyncManager` flushes 10 s after connecting, 30 s after new data, and every 15 min. One write-with-response at a time, sized to the MTU (max 30 records), acked records removed.
+4. iPhone: `PeripheralManager` decodes the batch, stages it on disk (`HealthKitWriter`, file protection *until first user authentication*), then responds `.success`. It responds `.requestNotSupported` when Apple Health sync is off, so the watch keeps its queue.
+5. iPhone: staged records are saved to HealthKit when it is writable (HealthKit is locked with the phone): right away, on unlock, on app foreground, or with the next batch.
+
+Wire format (little-endian), mirrored in `HealthProtocol.kt` / `HealthProtocol.swift`, with a shared golden test vector:
+
+```
+Batch  := version:u8 (=1) | count:u8 (1..255) | Record × count
+Record := type:u8 | start:u32 (Unix s) | end:u32 (Unix s) | value:f64     (17 bytes)
+type   := 1 heart rate (bpm, start == end) | 2 steps | 3 distance (m) | 4 floors | 5 asleep interval
+```
+
+Every HealthKit sample gets `HKMetadataKeySyncIdentifier = wearbridge.<type>.<start>.<end>` (version 1), so batches resent after a lost acknowledgement are not duplicated.
+
+If the watch only offers `*_DAILY` totals passively, `DailyTotals` turns them into increments. Sleep periods shorter than 10 min or longer than 24 h are dropped (`SleepSessions`).
 
 ## Quick Reply Flow
 

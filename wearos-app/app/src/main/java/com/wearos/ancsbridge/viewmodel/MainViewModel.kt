@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.wearos.ancsbridge.ancs.AncsService
 import com.wearos.ancsbridge.ble.BleScanner
+import com.wearos.ancsbridge.health.HealthMonitoring
 import com.wearos.ancsbridge.model.ConnectionState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,6 +40,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isBluetoothEnabled: Boolean get() = scanner.isBluetoothEnabled
 
     private val discoveredAppleDevices = mutableMapOf<String, ScanResult>()
+
+    // --- Health Data Bridge ---
+
+    private val _healthSyncEnabled = MutableStateFlow(HealthMonitoring.isEnabled(application))
+    val healthSyncEnabled: StateFlow<Boolean> = _healthSyncEnabled.asStateFlow()
+
+    private var lastHealthEnableFailed = false
+
+    private val _healthStatus = MutableStateFlow(healthStatusText())
+    val healthStatus: StateFlow<String> = _healthStatus.asStateFlow()
+
+    private var healthJob: Job? = null
+
+    /** Call once the needed permissions were requested (see MainActivity). */
+    fun setHealthSyncEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        val previous = healthJob
+        healthJob = viewModelScope.launch {
+            previous?.join()
+            if (enabled) {
+                lastHealthEnableFailed = !HealthMonitoring.enable(app)
+            } else {
+                lastHealthEnableFailed = false
+                HealthMonitoring.disable(app)
+            }
+            refreshHealthState()
+        }
+    }
+
+    /** The user declined every health permission. */
+    fun onHealthPermissionsDenied() {
+        lastHealthEnableFailed = true
+        refreshHealthState()
+    }
+
+    /** Re-register after a permission change, e.g. background heart rate was granted. */
+    fun refreshHealthSync() {
+        val app = getApplication<Application>()
+        val previous = healthJob
+        healthJob = viewModelScope.launch {
+            previous?.join()
+            HealthMonitoring.registerIfEnabled(app)
+            refreshHealthState()
+        }
+    }
+
+    private fun refreshHealthState() {
+        _healthSyncEnabled.value = HealthMonitoring.isEnabled(getApplication<Application>())
+        _healthStatus.value = healthStatusText()
+    }
+
+    private fun healthStatusText(): String {
+        val app = getApplication<Application>()
+        val activity = HealthMonitoring.hasActivityPermission(app)
+        val heartRate = HealthMonitoring.hasHeartRatePermission(app) &&
+            HealthMonitoring.hasBackgroundHeartRatePermission(app)
+        val enabled = HealthMonitoring.isEnabled(app)
+        return when {
+            !enabled && lastHealthEnableFailed && !activity && !heartRate -> "Health access not granted"
+            !enabled && lastHealthEnableFailed -> "Not available on this watch"
+            !enabled -> "Heart rate, steps and sleep to Apple Health"
+            !heartRate -> "Heart rate off: allow body sensors all the time"
+            !activity -> "Steps and sleep off: allow physical activity"
+            else -> "Also turn on Apple Health in the iPhone app"
+        }
+    }
 
     /**
      * Scan for Apple devices for 5 seconds, then connect to the strongest signal.

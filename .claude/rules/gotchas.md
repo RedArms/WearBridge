@@ -31,3 +31,7 @@
 15. **Multi-watch ANCS prioritization**: When multiple watches are bonded to the same iPhone, ANCS uses last-in-first-get — the watch that subscribed to Notification Source most recently receives events. Only one watch active at a time.
 
 16. **ANCS doesn't send REMOVE when call is answered**: When an incoming call is answered on iPhone, ANCS sends a MODIFIED event (EventID=1), not REMOVED. REMOVED only comes when the call fully ends. The call overlay must handle MODIFIED to transition to "Active on iPhone" state, otherwise it stays showing "Incoming Call" for the entire call duration.
+
+17. **One GATT operation at a time**: `BluetoothGatt.write*`/`read*` return false while another operation is in flight. Health sync writes share the link with ANCS Control Point writes, so Control Point writes are retried briefly (`writeControlPointWithRetry`) and health writes back off on `BUSY`.
+
+18. **Health Services forgets passive registrations on reboot**: `HealthMonitoring.registerIfEnabled()` runs on every `AncsService` start (which `BootReceiver` triggers). HealthKit is also unwritable while the iPhone is locked, hence the on-disk staging in `HealthKitWriter`.

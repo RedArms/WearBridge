@@ -37,13 +37,14 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.PhoneIphone
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.wear.compose.material3.Icon
 import com.wearos.ancsbridge.model.ConnectionState
 import com.wearos.ancsbridge.viewmodel.MainViewModel
 
 @SuppressLint("MissingPermission")
 @Composable
-fun MainScreen(viewModel: MainViewModel) {
+fun MainScreen(viewModel: MainViewModel, onToggleHealthSync: () -> Unit = {}) {
     var showPairScreen by remember { mutableStateOf(false) }
 
     if (showPairScreen) {
@@ -54,15 +55,22 @@ fun MainScreen(viewModel: MainViewModel) {
     } else {
         HomeScreen(
             viewModel = viewModel,
-            onPairNewDevice = { showPairScreen = true }
+            onPairNewDevice = { showPairScreen = true },
+            onToggleHealthSync = onToggleHealthSync
         )
     }
 }
 
 @SuppressLint("MissingPermission")
 @Composable
-fun HomeScreen(viewModel: MainViewModel, onPairNewDevice: () -> Unit) {
+fun HomeScreen(
+    viewModel: MainViewModel,
+    onPairNewDevice: () -> Unit,
+    onToggleHealthSync: () -> Unit = {}
+) {
     val connectionState by viewModel.connectionState.collectAsState()
+    val healthSyncEnabled by viewModel.healthSyncEnabled.collectAsState()
+    val healthStatus by viewModel.healthStatus.collectAsState()
 
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -140,6 +148,45 @@ fun HomeScreen(viewModel: MainViewModel, onPairNewDevice: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(0.9f)
                     ) {
                         Text("Clear Notifications", fontSize = 12.sp)
+                    }
+                }
+
+                item { Spacer(modifier = Modifier.height(4.dp)) }
+
+                // Health Data Bridge (Apple Health)
+                item {
+                    Button(
+                        onClick = onToggleHealthSync,
+                        modifier = Modifier.fillMaxWidth(0.9f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (healthSyncEnabled) Color(0xFF065F46) else Color(0xFF374151)
+                        )
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Rounded.Favorite,
+                                contentDescription = null,
+                                tint = if (healthSyncEnabled) Color(0xFFF87171) else Color(0xFF9CA3AF),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                if (healthSyncEnabled) "Health Sync: On" else "Health Sync: Off",
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
+                if (healthStatus.isNotEmpty()) {
+                    item {
+                        Text(
+                            healthStatus,
+                            fontSize = 10.sp,
+                            color = Color(0xFF9CA3AF),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+                        )
                     }
                 }
 

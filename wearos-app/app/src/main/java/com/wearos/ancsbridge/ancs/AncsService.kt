@@ -17,6 +17,8 @@ import com.wearos.ancsbridge.ble.AncsConstants
 import com.wearos.ancsbridge.ble.BleConnectionManager
 import com.wearos.ancsbridge.ble.BleScanner
 import com.wearos.ancsbridge.ble.BondStateReceiver
+import com.wearos.ancsbridge.health.HealthMonitoring
+import com.wearos.ancsbridge.health.HealthSyncManager
 import com.wearos.ancsbridge.model.AncsEvent
 import com.wearos.ancsbridge.model.AncsNotification
 import com.wearos.ancsbridge.model.ConnectionState
@@ -28,6 +30,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,6 +65,11 @@ class AncsService : Service() {
         const val NOTIFICATION_ID_CALL = 999
         private const val MAX_ACTIVE_NOTIFICATIONS = 20 // Android limit is 25; keep headroom
 
+        // Control Point writes fail while another GATT operation (e.g. a health
+        // sync write) is in flight, so retry briefly instead of dropping the request.
+        private const val CONTROL_POINT_WRITE_ATTEMPTS = 4
+        private const val CONTROL_POINT_RETRY_DELAY_MS = 150L
+
         /** Shared connection state observable by the ViewModel */
         private val _sharedConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
         val sharedConnectionState: StateFlow<ConnectionState> = _sharedConnectionState.asStateFlow()
@@ -72,6 +80,7 @@ class AncsService : Service() {
     private lateinit var scanner: BleScanner
     private lateinit var notificationManager: NotificationManager
     private lateinit var vibrator: Vibrator
+    private lateinit var healthSync: HealthSyncManager
 
     private val dataSourceAssembler = DataSourceAssembler()
     private val appNameCache = mutableMapOf<String, String>()
@@ -157,6 +166,13 @@ class AncsService : Service() {
 
         // Start the attribute request processor
         startRequestProcessor()
+
+        // Health Data Bridge: send passive health data to the iPhone (opt-in from
+        // the watch UI). Health Services forgets registrations on reboot, so
+        // re-register whenever the service starts.
+        healthSync = HealthSyncManager(this, connectionManager, scope)
+        healthSync.start()
+        scope.launch { HealthMonitoring.registerIfEnabled(this@AncsService) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -219,6 +235,7 @@ class AncsService : Service() {
         try {
             unregisterReceiver(connectionManager.bondStateReceiver)
         } catch (_: IllegalArgumentException) { }
+        healthSync.stop()
         connectionManager.destroy()
         attributeRequestQueue.close()
         scope.cancel()
@@ -408,7 +425,7 @@ class AncsService : Service() {
             hasNegativeAction = event.hasNegativeAction
         )
 
-        val success = connectionManager.writeControlPoint(cpData)
+        val success = writeControlPointWithRetry(cpData)
         if (!success) {
             Log.e(TAG, "Failed to write Control Point for uid=${event.notificationUid}")
             dataSourceAssembler.reset()
@@ -661,9 +678,21 @@ class AncsService : Service() {
     }
 
 
+    private suspend fun writeControlPointWithRetry(data: ByteArray): Boolean {
+        repeat(CONTROL_POINT_WRITE_ATTEMPTS) { attempt ->
+            if (connectionManager.writeControlPoint(data)) return true
+            if (attempt < CONTROL_POINT_WRITE_ATTEMPTS - 1) delay(CONTROL_POINT_RETRY_DELAY_MS)
+        }
+        return false
+    }
+
     private fun performNotificationAction(uid: Long, actionId: Int) {
         val data = ControlPointWriter.buildPerformNotificationAction(uid, actionId)
-        connectionManager.writeControlPoint(data)
+        scope.launch {
+            if (!writeControlPointWithRetry(data)) {
+                Log.e(TAG, "Failed to write notification action for uid=$uid")
+            }
+        }
         // Cancel vibration (in case this is a call answer/decline)
         vibrator.cancel()
         // Cancel the Android notification and remove from tracking

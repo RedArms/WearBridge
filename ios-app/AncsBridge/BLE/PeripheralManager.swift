@@ -28,10 +28,15 @@ class PeripheralManager: NSObject, ObservableObject {
     private var statusCharacteristic: CBMutableCharacteristic?
     private var callStateCharacteristic: CBMutableCharacteristic?
     private var serviceAdded = false
+    /// Set when state restoration brought back a companion service from an older version of the app.
+    private var needsServiceRebuild = false
     private var scanTimer: Timer?
 
     /// Monitors phone call state via CallKit for live call status sync
     let callStateObserver = CallStateObserver()
+
+    /// Saves health data sent by the watch to Apple Health
+    let healthWriter = HealthKitWriter(isEnabled: SettingsStore.isHealthSyncEnabled)
 
     /// Standard BLE service UUIDs to probe for connected devices.
     /// Wear OS watches expose these standard GATT services.
@@ -80,6 +85,24 @@ class PeripheralManager: NSObject, ObservableObject {
             callStateObserver.startObserving()
         } else {
             callStateObserver.stopObserving()
+        }
+    }
+
+    /// Turn Apple Health sync on (after asking for HealthKit permission) or off.
+    func setHealthSync(enabled: Bool) {
+        guard enabled else {
+            settingsStore.healthSync = false
+            healthWriter.discardStaged()
+            return
+        }
+        // `success` is false only when HealthKit can't be used at all (e.g. the build
+        // lacks the HealthKit entitlement); a user who declines still gets true.
+        healthWriter.requestAuthorization { [weak self] success in
+            guard let self else { return }
+            self.settingsStore.healthSync = success
+            if success {
+                self.healthWriter.flush()
+            }
         }
     }
 
@@ -249,11 +272,24 @@ class PeripheralManager: NSObject, ObservableObject {
             permissions: [.readable]
         )
 
+        // Encryption required: only the bonded watch may write into Apple Health.
+        let healthDataCharacteristic = CBMutableCharacteristic(
+            type: BLEConstants.healthDataCharacteristicUUID,
+            properties: [.write],
+            value: nil,
+            permissions: [.writeEncryptionRequired]
+        )
+
         companionService = CBMutableService(
             type: BLEConstants.companionServiceUUID,
             primary: true
         )
-        companionService?.characteristics = [statusCharacteristic!, quickReplyCharacteristic, callStateCharacteristic!]
+        companionService?.characteristics = [
+            statusCharacteristic!,
+            quickReplyCharacteristic,
+            callStateCharacteristic!,
+            healthDataCharacteristic,
+        ]
 
         peripheralManager.add(companionService!)
         serviceAdded = true
@@ -270,6 +306,12 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
 
         switch peripheral.state {
         case .poweredOn:
+            if needsServiceRebuild {
+                // Restored service predates the health characteristic; publish the current one.
+                peripheral.removeAllServices()
+                serviceAdded = false
+                needsServiceRebuild = false
+            }
             setupServices()
             if settingsStore.autoAdvertise {
                 startAdvertising()
@@ -312,15 +354,48 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        guard let firstRequest = requests.first else { return }
+        var result: CBATTError.Code = .success
+
         for request in requests {
-            if request.characteristic.uuid == BLEConstants.quickReplyCharacteristicUUID,
-               let data = request.value,
-               let payload = String(data: data, encoding: .utf8) {
-                logger.info("Quick reply received: \(payload)")
-                handleQuickReply(payload)
+            switch request.characteristic.uuid {
+            case BLEConstants.quickReplyCharacteristicUUID:
+                if let data = request.value,
+                   let payload = String(data: data, encoding: .utf8) {
+                    logger.info("Quick reply received: \(payload)")
+                    handleQuickReply(payload)
+                }
+            case BLEConstants.healthDataCharacteristicUUID:
+                let code = request.offset == 0 ? handleHealthData(request.value ?? Data()) : .invalidOffset
+                if code != .success {
+                    result = code
+                }
+            default:
+                break
             }
-            peripheral.respond(to: request, withResult: .success)
         }
+
+        // Core Bluetooth expects exactly one response per call, given the first request.
+        peripheral.respond(to: firstRequest, withResult: result)
+    }
+
+    /// Stage a health batch from the watch. A non-success result tells the watch
+    /// to keep the batch and retry later.
+    private func handleHealthData(_ data: Data) -> CBATTError.Code {
+        guard SettingsStore.isHealthSyncEnabled() else {
+            logger.info("Health data received but Apple Health sync is off")
+            return .requestNotSupported
+        }
+        guard let records = HealthProtocol.decodeBatch(data) else {
+            logger.error("Malformed health batch (\(data.count) bytes)")
+            return .invalidAttributeValueLength
+        }
+        guard healthWriter.stage(records) else {
+            return .unlikelyError
+        }
+        logger.info("Staged \(records.count) health records from watch")
+        healthWriter.flush()
+        return .success
     }
 
     private func handleQuickReply(_ payload: String) {
@@ -343,6 +418,10 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
         logger.info("Restoring peripheral manager state")
         if let services = dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService] {
             serviceAdded = !services.isEmpty
+            let hasHealthCharacteristic = services.contains { service in
+                service.characteristics?.contains { $0.uuid == BLEConstants.healthDataCharacteristicUUID } ?? false
+            }
+            needsServiceRebuild = serviceAdded && !hasHealthCharacteristic
         }
         if peripheral.isAdvertising {
             isAdvertising = true

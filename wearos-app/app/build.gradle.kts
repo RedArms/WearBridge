@@ -45,6 +45,9 @@ dependencies {
     // Wear OS
     implementation("com.google.android.gms:play-services-wearable:18.2.0")
 
+    // Health Services (passive heart rate, steps, sleep state for the Health Data Bridge)
+    implementation("androidx.health:health-services-client:1.1.0")
+
     // Compose for Wear OS
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.wear.compose:compose-material3:1.0.0-alpha29")

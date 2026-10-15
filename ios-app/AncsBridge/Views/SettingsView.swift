@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var viewModel: BLEViewModel
     @State private var liveCallStatusEnabled: Bool = false
+    @State private var healthSyncEnabled: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -42,6 +43,29 @@ struct SettingsView: View {
                         viewModel.peripheralManager.settingsStore.liveCallStatus = newValue
                         viewModel.peripheralManager.updateCallStateObserving()
                     }
+
+                    Toggle(isOn: $healthSyncEnabled) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Apple Health")
+                                Text("Save heart rate, steps, distance, floors and sleep from the watch. Turn on Health Sync on the watch too.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "heart.fill")
+                                .foregroundColor(.red)
+                        }
+                    }
+                    .disabled(!HealthKitWriter.isHealthDataAvailable)
+                    .onChange(of: healthSyncEnabled) { newValue in
+                        guard newValue != viewModel.peripheralManager.settingsStore.healthSync else { return }
+                        viewModel.peripheralManager.setHealthSync(enabled: newValue)
+                    }
+                    // Reflect the final state (e.g. turned back off if HealthKit is unavailable)
+                    .onReceive(viewModel.peripheralManager.settingsStore.$healthSync) { enabled in
+                        healthSyncEnabled = enabled
+                    }
                 }
 
                 // About
@@ -67,6 +91,7 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .onAppear {
                 liveCallStatusEnabled = viewModel.peripheralManager.settingsStore.liveCallStatus
+                healthSyncEnabled = viewModel.peripheralManager.settingsStore.healthSync
             }
         }
     }

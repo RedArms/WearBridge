@@ -9,9 +9,11 @@
 - Persist bonded device list and per-watch notification category preferences
 - Only one watch active at a time (BLE limitation with ANCS)
 
-## Health Data Bridge
-- Transfer Wear OS health/fitness data to iPhone via BLE + HealthKit
-- Requires custom BLE service on both sides + HealthKit entitlement
+## Health Data Bridge — follow-ups
+- Shipped: heart rate, steps, distance, floors, asleep periods (see ble-ancs-protocol.md)
+- Workouts (ExerciseClient sessions → HKWorkout with route)
+- Calories: Health Services CALORIES mixes basal + active; needs splitting before mapping to activeEnergyBurned
+- Show pending record count / last sync time on the watch and in the iOS app
 
 ## iOS Shortcut Template
 - Provide a pre-built "WearBridge Reply" shortcut for download

@@ -8,6 +8,7 @@ class SettingsStore: ObservableObject {
         static let autoAdvertise = "autoAdvertise"
         static let pairedDevices = "pairedDevices"
         static let liveCallStatus = "liveCallStatus"
+        static let healthSync = "healthSync"
     }
 
     @Published var autoAdvertise: Bool {
@@ -21,9 +22,21 @@ class SettingsStore: ObservableObject {
         didSet { defaults.set(liveCallStatus, forKey: Keys.liveCallStatus) }
     }
 
+    /// When enabled, health data sent by the watch is saved to Apple Health.
+    /// Off by default — requires HealthKit permission.
+    @Published var healthSync: Bool {
+        didSet { defaults.set(healthSync, forKey: Keys.healthSync) }
+    }
+
+    /// Thread-safe read of the health sync setting, for background BLE callbacks.
+    static func isHealthSyncEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: Keys.healthSync)
+    }
+
     init() {
         self.autoAdvertise = defaults.bool(forKey: Keys.autoAdvertise)
         self.liveCallStatus = defaults.bool(forKey: Keys.liveCallStatus)
+        self.healthSync = defaults.bool(forKey: Keys.healthSync)
         // Default to false — discoverability only via Add New Watch flow
         if !defaults.contains(key: Keys.autoAdvertise) {
             self.autoAdvertise = false

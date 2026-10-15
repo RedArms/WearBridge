@@ -31,6 +31,7 @@ iPhone (iOS 26)                       Wear OS Watch
 - **Haptic feedback** — category-aware vibration patterns via direct Vibrator API (50ms for messages, double-tap for calls)
 - **No cloud dependency** — everything runs over local BLE
 - **iOS companion app** — single-screen status UI with auto-detection of connected watches, "How it Works" explainer, and iOS 26 icon theming
+- **Health Data Bridge (opt-in)** — heart rate, steps, distance, floors climbed and sleep periods collected passively on the watch (Health Services) and saved to Apple Health by the companion app
 
 ## Tested Hardware
 
@@ -97,6 +98,16 @@ Open `ios-app/AncsBridge.xcodeproj` in Xcode and build. The companion app provid
 4. Accept the Bluetooth pairing dialog on the iPhone
 5. Notifications will start mirroring automatically
 
+### Health Data Bridge (optional)
+
+1. On the watch, tap **Health Sync** and allow physical activity and body sensors. Choose **Allow all the time** for body sensors, otherwise heart rate is skipped.
+2. In the iOS companion app, open **Settings → Apple Health** and allow WearBridge to write the requested types.
+3. The watch queues data while the iPhone is away and sends it in batches when connected. The iPhone stages batches on disk and saves them to Apple Health once it is unlocked.
+
+What syncs, when the watch supports it: heart rate, steps, walking + running distance, flights climbed and sleep. Sleep comes from Health Services' "asleep" activity state, so it shows up as *Asleep* without stages (no deep/REM). ECG, blood pressure and SpO2 are not available to third-party apps through Health Services.
+
+The companion app needs the HealthKit capability. If your Apple account can't sign apps with HealthKit, remove the two `healthkit` keys from `AncsBridge.entitlements`; everything else keeps working.
+
 ## Supported Apps
 
 75+ iOS apps are mapped with custom icons, including:
@@ -115,7 +126,7 @@ Unknown apps fall back to category-based icons (phone for calls, envelope for em
 - [ ] **Quick Reply BLE Transport** — Wire decline-with-message text to iOS companion app via custom BLE characteristic
 - [ ] **App Icon Support** — Expand to full-color Play Store PNGs as `largeIcon`
 - [ ] **Multi-Device Pairing** — Support switching between multiple Wear OS watches
-- [ ] **Health Data Bridge** — Transfer Wear OS health/fitness data to iPhone via BLE + HealthKit
+- [x] **Health Data Bridge** — Heart rate, steps, distance, floors and sleep from Health Services to HealthKit over BLE
 
 ## Contributing
 

@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.util.Log
 import com.wearos.ancsbridge.model.ConnectionState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.LinkedList
 
 /**
@@ -36,7 +38,22 @@ class BleConnectionManager(private val context: Context) {
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
         private const val INITIAL_RECONNECT_DELAY_MS = 3_000L
         private const val TARGET_MTU = 512
+        private const val DEFAULT_ATT_MTU = 23
         private const val MAX_SERVICE_DISCOVERY_RETRIES = 2
+        private const val HEALTH_WRITE_TIMEOUT_MS = 5_000L
+        private const val COMPANION_REDISCOVERY_INTERVAL_MS = 15 * 60_000L
+    }
+
+    /** Outcome of [writeHealthData]. */
+    enum class HealthWriteResult {
+        /** The iPhone acknowledged the batch. */
+        SUCCESS,
+        /** Another GATT operation is in flight; retry shortly. */
+        BUSY,
+        /** The companion app (with health support) is not reachable right now. */
+        UNSUPPORTED,
+        /** The iPhone rejected the write, or it timed out. */
+        FAILED
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -62,6 +79,15 @@ class BleConnectionManager(private val context: Context) {
     // CCCD write queue — must serialize descriptor writes
     private val descriptorWriteQueue = LinkedList<Pair<BluetoothGattCharacteristic, BluetoothGattDescriptor>>()
     private var isWritingDescriptor = false
+
+    /** ATT MTU negotiated with the iPhone; sizes health batches. */
+    @Volatile
+    var negotiatedMtu: Int = DEFAULT_ATT_MTU
+        private set
+
+    @Volatile
+    private var pendingHealthWrite: CompletableDeferred<Boolean>? = null
+    private var lastCompanionRediscoveryMs = -COMPANION_REDISCOVERY_INTERVAL_MS
 
     private var serviceDiscoveryRetries = 0
     private var notificationSourceChar: BluetoothGattCharacteristic? = null
@@ -96,6 +122,8 @@ class BleConnectionManager(private val context: Context) {
         onDisconnected = { gatt, status ->
             Log.i(TAG, "Disconnected, status=$status")
             _connectionState.value = ConnectionState.Disconnected()
+            pendingHealthWrite?.complete(false)
+            negotiatedMtu = DEFAULT_ATT_MTU
             clearCharacteristics()
             gatt.close()
             this.gatt = null
@@ -211,9 +239,15 @@ class BleConnectionManager(private val context: Context) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Characteristic write failed: $status for ${characteristic.uuid}")
             }
+            if (characteristic.uuid == AncsConstants.HEALTH_DATA_CHARACTERISTIC_UUID) {
+                pendingHealthWrite?.complete(status == BluetoothGatt.GATT_SUCCESS)
+            }
         },
         onMtuChanged = { mtu, status ->
             Log.i(TAG, "MTU negotiated: $mtu (status=$status)")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                negotiatedMtu = mtu
+            }
             // After MTU negotiation, discover services
             gatt?.discoverServices()
         },
@@ -424,9 +458,49 @@ class BleConnectionManager(private val context: Context) {
         Log.i(TAG, "writeQuickReply: wrote ${data.size} bytes, success=$success")
     }
 
+    /**
+     * Send one health batch (see HealthProtocol) to the companion app and wait for
+     * the iPhone's write response. The caller (HealthSyncManager) sends one batch
+     * at a time.
+     */
+    suspend fun writeHealthData(payload: ByteArray): HealthWriteResult {
+        val gatt = this.gatt ?: return HealthWriteResult.FAILED
+        val char = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID)
+            ?.getCharacteristic(AncsConstants.HEALTH_DATA_CHARACTERISTIC_UUID)
+        if (char == null) {
+            requestCompanionRediscovery(gatt)
+            return HealthWriteResult.UNSUPPORTED
+        }
+
+        val ack = CompletableDeferred<Boolean>()
+        pendingHealthWrite = ack
+        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        char.value = payload
+        if (!gatt.writeCharacteristic(char)) {
+            pendingHealthWrite = null
+            return HealthWriteResult.BUSY
+        }
+        val acknowledged = withTimeoutOrNull(HEALTH_WRITE_TIMEOUT_MS) { ack.await() }
+        pendingHealthWrite = null
+        return if (acknowledged == true) HealthWriteResult.SUCCESS else HealthWriteResult.FAILED
+    }
+
+    /**
+     * The companion service is only in the iPhone's GATT table while the app runs.
+     * If it was missing when we connected, refresh the service list now and then.
+     */
+    private fun requestCompanionRediscovery(gatt: BluetoothGatt) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastCompanionRediscoveryMs < COMPANION_REDISCOVERY_INTERVAL_MS) return
+        lastCompanionRediscoveryMs = now
+        Log.i(TAG, "Health characteristic not found, re-discovering services")
+        gatt.discoverServices()
+    }
+
     fun disconnect() {
         autoReconnect = false
         reconnectJob?.cancel()
+        pendingHealthWrite?.complete(false)
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -501,6 +575,7 @@ class BleConnectionManager(private val context: Context) {
     fun destroy() {
         autoReconnect = false
         reconnectJob?.cancel()
+        pendingHealthWrite?.complete(false)
         gatt?.disconnect()
         gatt?.close()
         gatt = null
