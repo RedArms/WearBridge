@@ -26,5 +26,5 @@ include(":shared") // Health Data Bridge wire format, shared with the relay
 if (file("relay/libs").listFiles()?.any { it.name.endsWith(".aar") } == true) {
     include(":relay")
 } else {
-    println("WearBridge: :relay skipped — no Samsung Health Data SDK .aar in ${file("relay/libs").absolutePath}")
+    println("WearBridge: :relay skipped - no Samsung Health Data SDK .aar in ${file("relay/libs").absolutePath}")
 }
