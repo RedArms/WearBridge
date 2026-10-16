@@ -115,6 +115,7 @@ class NotificationLookTest {
         assertEquals("M", NotificationLook.initials("marie"))
         assertEquals("JM", NotificationLook.initials("Jean-Pierre (Boulot) Martin"))
         assertEquals("", NotificationLook.initials("+32 470 12 34 56"))
+        assertEquals("", NotificationLook.initials("\u202A+32\u2011470\u201112\u202C"))
         assertEquals("É", NotificationLook.initials("émilie"))
         assertEquals("🎉", NotificationLook.initials("🎉"))
         assertEquals("M", NotificationLook.initials("❤️ Maman"))

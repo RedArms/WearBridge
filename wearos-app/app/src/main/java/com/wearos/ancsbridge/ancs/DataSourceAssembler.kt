@@ -48,6 +48,11 @@ class DataSourceAssembler {
     private var appIdentifier: String = ""
     private var headerParsed = false
 
+    // What the pending request asked for; anything else is dropped.
+    private var expectedCommand: Int = -1
+    private var expectedUid: Long = -1
+    private var expectedAppIdentifier: String = ""
+
     // Parsed attributes
     private val attributes = mutableMapOf<Int, String>()
 
@@ -81,6 +86,8 @@ class DataSourceAssembler {
     ) {
         reset()
         notificationUid = uid
+        expectedCommand = AncsConstants.COMMAND_GET_NOTIFICATION_ATTRIBUTES
+        expectedUid = uid
         expectedAttributes = requestedAttributes
         categoryId = category
         eventFlags = flags
@@ -93,6 +100,8 @@ class DataSourceAssembler {
     fun expectAppAttributes(appIdentifier: String) {
         reset()
         this.appIdentifier = appIdentifier
+        expectedCommand = AncsConstants.COMMAND_GET_APP_ATTRIBUTES
+        expectedAppIdentifier = appIdentifier
         expectedAttributes = listOf(AncsConstants.APP_ATTR_DISPLAY_NAME)
         state = State.READING_HEADER
     }
@@ -112,9 +121,10 @@ class DataSourceAssembler {
      */
     fun onData(data: ByteArray): Result? {
         if (state == State.IDLE) {
-            // Unexpected data — start fresh header parse
-            state = State.READING_HEADER
-            headerParsed = false
+            // Nothing was requested: a late fragment of a response we gave up on.
+            // Parsing it without a request would post a blank notification.
+            Log.w(TAG, "Dropping ${data.size} unexpected Data Source bytes")
+            return null
         }
 
         buffer.write(data)
@@ -136,6 +146,7 @@ class DataSourceAssembler {
                 AncsConstants.COMMAND_GET_NOTIFICATION_ATTRIBUTES -> {
                     if (bytes.size < 5) return null // Need at least CommandID + UID
                     notificationUid = readUInt32LE(bytes, 1)
+                    if (!isExpected(commandId, notificationUid, null)) return null
                     offset = 5
                     headerParsed = true
                     state = State.READING_ATTRIBUTES
@@ -145,6 +156,7 @@ class DataSourceAssembler {
                     val nullIndex = bytes.indexOf(0.toByte(), fromIndex = 1)
                     if (nullIndex == -1) return null // Haven't received full app ID yet
                     appIdentifier = String(bytes, 1, nullIndex - 1, Charsets.UTF_8)
+                    if (!isExpected(commandId, null, appIdentifier)) return null
                     offset = nullIndex + 1
                     headerParsed = true
                     state = State.READING_ATTRIBUTES
@@ -226,6 +238,19 @@ class DataSourceAssembler {
         return null
     }
 
+    /** False (and drops everything) when a response doesn't answer the pending request. */
+    private fun isExpected(command: Int, uid: Long?, appId: String?): Boolean {
+        val matches = command == expectedCommand &&
+            (uid == null || uid == expectedUid) &&
+            (appId == null || appId == expectedAppIdentifier)
+        if (!matches) {
+            Log.w(TAG, "Dropping a Data Source response for command $command (uid=$uid app=$appId); " +
+                "expected command $expectedCommand")
+            reset()
+        }
+        return matches
+    }
+
     private fun buildNotification(): AncsNotification {
         return AncsNotification(
             uid = notificationUid,
@@ -275,6 +300,9 @@ class DataSourceAssembler {
         notificationUid = 0
         appIdentifier = ""
         headerParsed = false
+        expectedCommand = -1
+        expectedUid = -1
+        expectedAppIdentifier = ""
         attributes.clear()
         expectedAttributes = emptyList()
         currentAttrIndex = 0
