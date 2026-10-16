@@ -214,6 +214,33 @@ class DataSourceAssemblerTest {
         assertNull(assembler.onDataReceived(buildAppResponse("com.apple.MobileSMS", "Messages")))
     }
 
+    @Test
+    fun `late notification response is dropped while an app name is expected`() {
+        assembler.expectAppAttributes("com.apple.MobileSMS")
+        val late = buildResponse(commandId = 0, uid = 9, attributes = listOf(0 to "com.apple.MobileSMS", 1 to "Marie"))
+        assertNull(assembler.onData(late))
+        // Leftover fragments are dropped too instead of becoming a blank notification.
+        assertNull(assembler.onData(byteArrayOf(1, 2, 3)))
+    }
+
+    @Test
+    fun `response for another notification is dropped`() {
+        assembler.expectNotificationAttributes(
+            uid = 7,
+            requestedAttributes = listOf(AncsConstants.ATTR_APP_IDENTIFIER, AncsConstants.ATTR_TITLE),
+            category = AncsConstants.CATEGORY_SOCIAL,
+            flags = 0
+        )
+        val other = buildResponse(commandId = 0, uid = 8, attributes = listOf(0 to "com.apple.MobileSMS", 1 to "Paul"))
+        assertNull(assembler.onDataReceived(other))
+    }
+
+    @Test
+    fun `data without a request is ignored`() {
+        val stray = buildResponse(commandId = 0, uid = 3, attributes = listOf(0 to "x", 1 to "y"))
+        assertNull(assembler.onData(stray))
+    }
+
     private fun buildAppResponse(appIdentifier: String, displayName: String): ByteArray {
         val buffer = ByteArrayOutputStream()
         buffer.write(AncsConstants.COMMAND_GET_APP_ATTRIBUTES)

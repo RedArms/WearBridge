@@ -27,6 +27,7 @@ import com.wearos.ancsbridge.model.AncsNotification
 import com.wearos.ancsbridge.model.ConnectionState
 import com.wearos.ancsbridge.ui.IncomingCallActivity
 import com.wearos.ancsbridge.ui.MainActivity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Foreground service that manages the BLE connection to iPhone and ANCS notification pipeline.
@@ -66,6 +68,8 @@ class AncsService : Service() {
         const val EXTRA_QUICK_REPLY_TEXT = "quick_reply_text"
         const val NOTIFICATION_ID_CALL = 999
         private const val MAX_ACTIVE_NOTIFICATIONS = 20 // Android limit is 25; keep headroom
+        // How long one Control Point request may wait for its Data Source response.
+        private const val DATA_SOURCE_TIMEOUT_MS = 2_000L
 
         /** Shared connection state observable by the ViewModel */
         private val _sharedConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
@@ -79,6 +83,8 @@ class AncsService : Service() {
     private lateinit var vibrator: Vibrator
 
     private val dataSourceAssembler = DataSourceAssembler()
+    /** Completed when the Data Source response to the current request is complete. */
+    private var pendingResponse: CompletableDeferred<Unit>? = null
     private lateinit var appNames: AppNameStore
 
     // Track active notification IDs in posting order (oldest first) for auto-cleanup
@@ -384,7 +390,9 @@ class AncsService : Service() {
     }
 
     private fun handleDataSourceEvent(data: ByteArray) {
-        when (val result = dataSourceAssembler.onData(data)) {
+        val result = dataSourceAssembler.onData(data)
+        if (result != null) pendingResponse?.complete(Unit)
+        when (result) {
             is DataSourceAssembler.Result.Notification -> {
                 val notification = result.notification
                 Log.i(TAG, "Notification complete: ${notification.title} - ${notification.message}")
@@ -429,25 +437,40 @@ class AncsService : Service() {
             hasNegativeAction = event.hasNegativeAction
         )
 
+        pendingResponse = CompletableDeferred()
         val success = connectionManager.writeControlPoint(cpData)
         if (!success) {
             Log.e(TAG, "Failed to write Control Point for uid=${event.notificationUid}")
             dataSourceAssembler.reset()
+            pendingResponse = null
+            return
         }
 
-        // The response will come asynchronously via dataSourceEvents -> handleDataSourceEvent
-        // We add a small delay before processing the next request to allow the DS response to complete
-        kotlinx.coroutines.delay(500)
+        // The response comes through dataSourceEvents -> handleDataSourceEvent.
+        awaitDataSourceResponse()
+    }
+
+    /** One request at a time: the next one only goes out once this response is complete. */
+    private suspend fun awaitDataSourceResponse() {
+        val response = pendingResponse ?: return
+        if (withTimeoutOrNull(DATA_SOURCE_TIMEOUT_MS) { response.await() } == null) {
+            Log.w(TAG, "No complete Data Source response in time")
+            dataSourceAssembler.reset()
+        }
+        pendingResponse = null
     }
 
     private suspend fun processAppNameRequest(request: AppNameRequest) {
         dataSourceAssembler.expectAppAttributes(request.appIdentifier)
         val cpData = ControlPointWriter.buildGetAppAttributes(request.appIdentifier)
+        pendingResponse = CompletableDeferred()
         if (!connectionManager.writeControlPoint(cpData)) {
             Log.w(TAG, "Failed to request the app name of ${request.appIdentifier}")
             dataSourceAssembler.reset()
+            pendingResponse = null
+            return
         }
-        kotlinx.coroutines.delay(500)
+        awaitDataSourceResponse()
     }
 
     private suspend fun postNotification(notification: AncsNotification) {

@@ -293,7 +293,8 @@ object NotificationLook {
      * letters give their first symbol (often an emoji).
      */
     fun initials(name: String): String {
-        val trimmed = name.trim()
+        // iOS wraps phone numbers in invisible direction marks (U+202A..U+202E and the like).
+        val trimmed = name.filterNot { Character.getType(it) == Character.FORMAT.toInt() }.trim()
         if (trimmed.isEmpty() || isPhoneNumber(trimmed)) return ""
         val letters = trimmed.split(Regex("\\s+")).mapNotNull(::firstLetter)
         return when {
@@ -314,7 +315,7 @@ object NotificationLook {
     }
 
     private fun isPhoneNumber(text: String): Boolean =
-        text.any { it.isDigit() } && text.all { it.isDigit() || it in "+-()./  " }
+        text.any { it.isDigit() } && text.all { it.isDigit() || it in "+-()./ \u00A0\u2010\u2011" }
 
     /** Lays out a notification: who it is from, and its text. */
     fun content(notification: AncsNotification, appName: String): Content {
