@@ -150,10 +150,21 @@ class BleConnectionManager(private val context: Context) {
             Log.i(TAG, "ANCS service found!")
             serviceDiscoveryRetries = 0
 
-            // If already subscribed (rediscovery for companion service), just read companion
+            // If already subscribed (rediscovery for companion service), refresh the
+            // companion side only: ANCS stays subscribed (gotcha 12).
             if (notificationSourceChar != null && dataSourceChar != null) {
                 Log.i(TAG, "ANCS already subscribed, checking companion service")
+                // Fresh characteristic objects, in case handles moved.
+                ancsService.getCharacteristic(AncsConstants.NOTIFICATION_SOURCE_UUID)?.let { notificationSourceChar = it }
+                ancsService.getCharacteristic(AncsConstants.CONTROL_POINT_UUID)?.let { controlPointChar = it }
+                ancsService.getCharacteristic(AncsConstants.DATA_SOURCE_UUID)?.let { dataSourceChar = it }
                 readCompanionStatus()
+                // The companion app may have republished its service: subscribe again.
+                scope.launch {
+                    delay(500)
+                    subscribeToCallState()
+                    subscribeToWakeAlarm()
+                }
                 return@GattCallback
             }
 
@@ -229,6 +240,10 @@ class BleConnectionManager(private val context: Context) {
         },
         onWakeAlarmChanged = { data ->
             _wakeAlarmEvents.tryEmit(data)
+        },
+        onServicesChangedCallback = { changedGatt ->
+            Log.i(TAG, "iPhone services changed, re-discovering")
+            changedGatt.discoverServices()
         }
     )
 

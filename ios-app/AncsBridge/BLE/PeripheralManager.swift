@@ -331,7 +331,9 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
             if settingsStore.autoAdvertise {
                 startAdvertising()
             }
-        case .poweredOff:
+        case .poweredOff, .resetting:
+            // Core Bluetooth drops published services; add them again when it's back.
+            serviceAdded = false
             isAdvertising = false
             discoveredWatches = []
         default:

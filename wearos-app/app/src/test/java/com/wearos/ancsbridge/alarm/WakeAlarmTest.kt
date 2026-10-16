@@ -54,6 +54,8 @@ class WakeAlarmTest {
     fun `only Clock notifications with actions count as alarms`() {
         assertNotNull(ClockAlarm.from(1, ClockAlarm.CLOCK_APP, "Snooze", "Stop"))
         assertNull(ClockAlarm.from(1, ClockAlarm.CLOCK_APP, null, null))
+        assertNull(ClockAlarm.from(1, ClockAlarm.CLOCK_APP, null, "Clear"))
+        assertNotNull(ClockAlarm.from(1, ClockAlarm.CLOCK_APP, null, "Arrêter"))
         assertNull(ClockAlarm.from(1, "com.apple.MobileSMS", "Reply", "Clear"))
     }
 }

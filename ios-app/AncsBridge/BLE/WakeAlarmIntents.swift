@@ -1,4 +1,12 @@
 import AppIntents
+import Foundation
+
+/// Shown by Shortcuts when the automation couldn't tell the watch.
+struct WatchNotReachedError: LocalizedError {
+    var errorDescription: String? {
+        "WearBridge couldn't reach the watch. Check that it's connected to this iPhone."
+    }
+}
 
 /// Shortcuts actions that keep the watch's wake-up alarm in sync with the iPhone's.
 ///
@@ -14,7 +22,7 @@ struct RingWatchAlarmIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        _ = await PeripheralManager.shared.setWakeAlarm(ringing: true)
+        guard await PeripheralManager.shared.setWakeAlarm(ringing: true) else { throw WatchNotReachedError() }
         return .result()
     }
 }
@@ -28,7 +36,7 @@ struct StopWatchAlarmIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        _ = await PeripheralManager.shared.setWakeAlarm(ringing: false)
+        guard await PeripheralManager.shared.setWakeAlarm(ringing: false) else { throw WatchNotReachedError() }
         return .result()
     }
 }

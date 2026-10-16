@@ -28,8 +28,9 @@ data class ClockAlarm(
             negativeActionLabel: String?
         ): ClockAlarm? {
             if (appIdentifier != CLOCK_APP) return null
-            if (positiveActionLabel.isNullOrBlank() && negativeActionLabel.isNullOrBlank()) return null
-            return ClockAlarm(uid, positiveActionLabel, negativeActionLabel)
+            val alarm = ClockAlarm(uid, positiveActionLabel, negativeActionLabel)
+            // Other Clock notifications (bedtime reminders...) only offer a generic "Clear".
+            return alarm.takeIf { it.stopActionId != null || it.snoozeActionId != null }
         }
 
         private fun matches(label: String?, words: List<String>): Boolean {
@@ -43,7 +44,7 @@ data class ClockAlarm(
         get() = when {
             matches(negativeActionLabel, stopWords) -> AncsConstants.ACTION_NEGATIVE
             matches(positiveActionLabel, stopWords) -> AncsConstants.ACTION_POSITIVE
-            // A single unrecognized action next to a snooze action is the stop action.
+            // An unrecognized action next to a snooze action is the stop action.
             matches(positiveActionLabel, snoozeWords) && negativeActionLabel != null -> AncsConstants.ACTION_NEGATIVE
             matches(negativeActionLabel, snoozeWords) && positiveActionLabel != null -> AncsConstants.ACTION_POSITIVE
             else -> null
