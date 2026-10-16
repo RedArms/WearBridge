@@ -29,6 +29,12 @@ class DataSourceAssembler {
         private const val TAG = "DataSourceAssembler"
     }
 
+    /** A complete Data Source response. */
+    sealed class Result {
+        data class Notification(val notification: AncsNotification) : Result()
+        data class AppAttributes(val appIdentifier: String, val displayName: String) : Result()
+    }
+
     private enum class State {
         IDLE,
         READING_HEADER,
@@ -39,6 +45,7 @@ class DataSourceAssembler {
     private val buffer = ByteArrayOutputStream()
     private var commandId: Int = -1
     private var notificationUid: Long = 0
+    private var appIdentifier: String = ""
     private var headerParsed = false
 
     // Parsed attributes
@@ -81,11 +88,29 @@ class DataSourceAssembler {
     }
 
     /**
+     * Start expecting a GetAppAttributes response carrying the app's display name.
+     */
+    fun expectAppAttributes(appIdentifier: String) {
+        reset()
+        this.appIdentifier = appIdentifier
+        expectedAttributes = listOf(AncsConstants.APP_ATTR_DISPLAY_NAME)
+        state = State.READING_HEADER
+    }
+
+    /**
      * Feed incoming Data Source bytes. Call this for each onCharacteristicChanged.
      *
      * @return A completed AncsNotification if all attributes have been parsed, null otherwise.
      */
-    fun onDataReceived(data: ByteArray): AncsNotification? {
+    fun onDataReceived(data: ByteArray): AncsNotification? =
+        (onData(data) as? Result.Notification)?.notification
+
+    /**
+     * Feed incoming Data Source bytes. Call this for each onCharacteristicChanged.
+     *
+     * @return The completed response (notification or app attributes), or null while incomplete.
+     */
+    fun onData(data: ByteArray): Result? {
         if (state == State.IDLE) {
             // Unexpected data — start fresh header parse
             state = State.READING_HEADER
@@ -96,7 +121,7 @@ class DataSourceAssembler {
         return tryParse()
     }
 
-    private fun tryParse(): AncsNotification? {
+    private fun tryParse(): Result? {
         val bytes = buffer.toByteArray()
         var offset = 0
 
@@ -119,6 +144,7 @@ class DataSourceAssembler {
                     // Read null-terminated app identifier
                     val nullIndex = bytes.indexOf(0.toByte(), fromIndex = 1)
                     if (nullIndex == -1) return null // Haven't received full app ID yet
+                    appIdentifier = String(bytes, 1, nullIndex - 1, Charsets.UTF_8)
                     offset = nullIndex + 1
                     headerParsed = true
                     state = State.READING_ATTRIBUTES
@@ -142,8 +168,10 @@ class DataSourceAssembler {
 
                 // Read 2-byte length
                 if (offset + 1 >= bytes.size) {
-                    // Need more data for length
-                    compactBuffer(bytes, offset)
+                    // Need more data for length: keep the attribute ID too, so the
+                    // next fragment re-reads ID + length together.
+                    compactBuffer(bytes, offset - 1)
+                    currentAttrId = -1
                     return null
                 }
 
@@ -184,9 +212,13 @@ class DataSourceAssembler {
 
         // Check if all attributes are parsed
         if (currentAttrIndex >= expectedAttributes.size) {
-            val notification = buildNotification()
+            val result = if (commandId == AncsConstants.COMMAND_GET_APP_ATTRIBUTES) {
+                Result.AppAttributes(appIdentifier, attributes[AncsConstants.APP_ATTR_DISPLAY_NAME] ?: "")
+            } else {
+                Result.Notification(buildNotification())
+            }
             reset()
-            return notification
+            return result
         }
 
         // Still need more data
@@ -241,6 +273,7 @@ class DataSourceAssembler {
         buffer.reset()
         commandId = -1
         notificationUid = 0
+        appIdentifier = ""
         headerParsed = false
         attributes.clear()
         expectedAttributes = emptyList()

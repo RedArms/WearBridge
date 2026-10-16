@@ -75,6 +75,17 @@ When a call is answered on the iPhone, the watch overlay transitions from "Incom
 
 The iPhone can't detect ANCS connections (system-level). Instead, `CBCentralManager.retrieveConnectedPeripherals(withServices:)` probes for devices with standard BLE services (Device Info 0x180A, Battery 0x180F, etc.) and filters by known watch name patterns. Polls every 10 seconds.
 
+## Notification Look
+
+`NotificationLook` (pure Kotlin, unit tested) decides how a notification reads; `AncsService.postNotification` applies it. Everything uses `MessagingStyle` (gotcha 14).
+
+- **Sender**: for chat apps (Messages, WhatsApp, Telegram, Signal, Messenger, Slack, Discord, Teams, Instagram, Snapchat), calls and email, the ANCS title is the sender. A chat subtitle becomes the group name (`setConversationTitle` + group conversation). For every other app, the app itself is the sender and the title becomes a bold first line.
+- **Email**: sender + bold subject + body.
+- **Avatars**: `NotificationAvatars` draws initials on a colored disc (person outline for phone numbers). People get a stable palette color from their name; apps get their accent color.
+- **Accent color**: `setColor` with the app's brand color (white for black brands), else by category, else a stable palette color per app.
+- **App names**: the iPhone's own (localized) display name, fetched once per app with ANCS GetAppAttributes after its first notification and kept in `AppNameStore` (SharedPreferences). Until then: `knownAppNames`, else a prettified bundle ID ("com.vinted.app" -> "Vinted").
+- `DataSourceAssembler.onData` returns either a notification or an app attributes result. A fragment boundary inside an attribute's 2-byte length used to blank that attribute; the ID and length are now re-read together.
+
 ## App Icon Mapping
 
 75 iOS bundle IDs mapped in `AppIconMapper.kt`. 37 notification icons with 25% padding (viewport 32, translate 4). Call screen uses 3 Lucide stroke icons. Watch UI uses Material Icons Extended.

@@ -35,6 +35,7 @@ object AppIconMapper {
         "com.apple.podcasts" to R.drawable.ic_podcast,
         "com.apple.findmy" to R.drawable.ic_location,
         "com.apple.Photos" to R.drawable.ic_camera,
+        "com.apple.mobileslideshow" to R.drawable.ic_camera,
         "com.apple.TestFlight" to R.drawable.ic_notification_default,
         "com.apple.AppStore" to R.drawable.ic_shopping,
         "com.apple.Passwords" to R.drawable.ic_vpn,
@@ -48,6 +49,9 @@ object AppIconMapper {
         "org.whispersystems.signal" to R.drawable.ic_signal,
         "com.slack.Slack" to R.drawable.ic_slack,
         "com.hammerandchisel.discord" to R.drawable.ic_discord,
+        "ph.telegra.Telegraph" to R.drawable.ic_telegram, // App Store Telegram
+        "com.tinyspeck.chatlyio" to R.drawable.ic_slack, // App Store Slack
+        "com.microsoft.skype.teams" to R.drawable.ic_business,
 
         // Social
         "com.atebits.Tweetie2" to R.drawable.ic_social,
@@ -79,10 +83,14 @@ object AppIconMapper {
         // Entertainment & Media
         "com.spotify.client" to R.drawable.ic_music,
         "com.shazam.Shazam" to R.drawable.ic_music,
+        "com.netflix.Netflix" to R.drawable.ic_entertainment,
+        "com.waze.iphone" to R.drawable.ic_location,
 
         // Ride-sharing & Delivery
         "com.ubercab.UberClient" to R.drawable.ic_rideshare,
         "com.ubercab.UberEats" to R.drawable.ic_rideshare,
+        "com.deliveroo.orderapp" to R.drawable.ic_shopping,
+        "com.revolut.revolut" to R.drawable.ic_wallet,
 
         // Finance & Banking
         "au.com.westpac.ConsultWPC" to R.drawable.ic_wallet,
