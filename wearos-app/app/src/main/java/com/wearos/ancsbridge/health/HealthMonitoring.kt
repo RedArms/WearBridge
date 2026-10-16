@@ -238,11 +238,11 @@ object HealthMonitoring {
     /** Records sent by the phone relay (Samsung Health), see HealthRelayListenerService. */
     fun onRelayRecords(context: Context, records: List<HealthRecord>) {
         prefs(context).edit().putLong(KEY_RELAY_LAST_SEEN, System.currentTimeMillis()).apply()
-        if (!isEnabled(context)) {
-            Log.w(TAG, "Dropping ${records.size} relay records: Health Sync is off on the watch")
-            return
-        }
-        queue(context, records)
+        // Keep them even while Health Sync is off: the relay counts them as delivered
+        // and won't resend for a day. They are sent once sync is on (turning it off clears the queue).
+        if (records.isEmpty()) return
+        store(context).append(records)
+        _newData.tryEmit(Unit)
     }
 
     fun isRelayActive(context: Context): Boolean {
