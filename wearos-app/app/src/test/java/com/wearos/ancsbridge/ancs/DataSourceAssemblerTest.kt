@@ -172,6 +172,61 @@ class DataSourceAssemblerTest {
     }
 
     // Helper to build a raw ANCS Data Source response
+    @Test
+    fun `parse app attributes response`() {
+        assembler.expectAppAttributes("com.apple.mobilephone")
+        val result = assembler.onData(buildAppResponse("com.apple.mobilephone", "Téléphone"))
+        assertEquals(DataSourceAssembler.Result.AppAttributes("com.apple.mobilephone", "Téléphone"), result)
+    }
+
+    @Test
+    fun `parse fragmented app attributes response`() {
+        assembler.expectAppAttributes("net.whatsapp.WhatsApp")
+        val response = buildAppResponse("net.whatsapp.WhatsApp", "WhatsApp")
+        // Split inside the app identifier, then inside the attribute length.
+        assertNull(assembler.onData(response.copyOfRange(0, 6)))
+        val lengthAt = 1 + "net.whatsapp.WhatsApp".length + 1 + 1
+        assertNull(assembler.onData(response.copyOfRange(6, lengthAt + 1)))
+        val result = assembler.onData(response.copyOfRange(lengthAt + 1, response.size))
+        assertEquals(DataSourceAssembler.Result.AppAttributes("net.whatsapp.WhatsApp", "WhatsApp"), result)
+    }
+
+    @Test
+    fun `notification after an app attributes response`() {
+        assembler.expectAppAttributes("com.apple.MobileSMS")
+        assertNotNull(assembler.onData(buildAppResponse("com.apple.MobileSMS", "Messages")))
+
+        assembler.expectNotificationAttributes(
+            uid = 7,
+            requestedAttributes = listOf(AncsConstants.ATTR_APP_IDENTIFIER, AncsConstants.ATTR_TITLE),
+            category = AncsConstants.CATEGORY_SOCIAL,
+            flags = 0
+        )
+        val notification = assembler.onDataReceived(
+            buildResponse(commandId = 0, uid = 7, attributes = listOf(0 to "com.apple.MobileSMS", 1 to "Marie"))
+        )
+        assertEquals("Marie", notification!!.title)
+    }
+
+    @Test
+    fun `app attributes response is not returned as a notification`() {
+        assembler.expectAppAttributes("com.apple.MobileSMS")
+        assertNull(assembler.onDataReceived(buildAppResponse("com.apple.MobileSMS", "Messages")))
+    }
+
+    private fun buildAppResponse(appIdentifier: String, displayName: String): ByteArray {
+        val buffer = ByteArrayOutputStream()
+        buffer.write(AncsConstants.COMMAND_GET_APP_ATTRIBUTES)
+        buffer.write(appIdentifier.toByteArray(Charsets.UTF_8))
+        buffer.write(0)
+        val name = displayName.toByteArray(Charsets.UTF_8)
+        buffer.write(AncsConstants.APP_ATTR_DISPLAY_NAME)
+        buffer.write(name.size and 0xFF)
+        buffer.write((name.size shr 8) and 0xFF)
+        buffer.write(name)
+        return buffer.toByteArray()
+    }
+
     private fun buildResponse(
         commandId: Int,
         uid: Long,

@@ -7,10 +7,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothDevice
 import android.content.Intent
+import android.graphics.Typeface
 import android.os.IBinder
 import android.os.Vibrator
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.StyleSpan
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import com.wearos.ancsbridge.AncsApplication
 import com.wearos.ancsbridge.R
 import com.wearos.ancsbridge.ble.AncsConstants
@@ -89,7 +94,7 @@ class AncsService : Service() {
     private lateinit var healthSync: HealthSyncManager
 
     private val dataSourceAssembler = DataSourceAssembler()
-    private val appNameCache = mutableMapOf<String, String>()
+    private lateinit var appNames: AppNameStore
 
     // Track active notification IDs in posting order (oldest first) for auto-cleanup
     private val activeNotificationIds = ArrayDeque<Int>()
@@ -104,14 +109,19 @@ class AncsService : Service() {
     @Volatile private var callStartedMs = 0L
     private val reconnectionGracePeriodMs = 60_000L
 
-    // Serial queue for Control Point requests
-    private val attributeRequestQueue = Channel<AttributeRequest>(Channel.BUFFERED)
+    // Serial queue for Control Point requests (one Data Source response at a time)
+    private val attributeRequestQueue = Channel<ControlPointRequest>(Channel.BUFFERED)
     private var requestProcessorJob: Job? = null
+
+    private sealed interface ControlPointRequest
 
     private data class AttributeRequest(
         val event: AncsEvent,
         val requestedAttributes: List<Int>
-    )
+    ) : ControlPointRequest
+
+    /** Asks the iPhone for an app's display name (once per app, see AppNameStore). */
+    private data class AppNameRequest(val appIdentifier: String) : ControlPointRequest
 
     override fun onCreate() {
         super.onCreate()
@@ -119,6 +129,7 @@ class AncsService : Service() {
         scanner = BleScanner(this)
         notificationManager = getSystemService(NotificationManager::class.java)
         vibrator = getSystemService(Vibrator::class.java)
+        appNames = AppNameStore(this)
 
         // Register bond state receiver
         registerReceiver(connectionManager.bondStateReceiver, BondStateReceiver.intentFilter)
@@ -408,19 +419,29 @@ class AncsService : Service() {
 
     private fun handleDataSourceEvent(data: ByteArray) {
         lastAncsActivityMs = System.currentTimeMillis()
-        val notification = dataSourceAssembler.onDataReceived(data)
-        if (notification != null) {
-            Log.i(TAG, "Notification complete: ${notification.title} - ${notification.message}")
-            scope.launch {
-                postNotification(notification)
+        when (val result = dataSourceAssembler.onData(data)) {
+            is DataSourceAssembler.Result.Notification -> {
+                val notification = result.notification
+                Log.i(TAG, "Notification complete: ${notification.title} - ${notification.message}")
+                scope.launch {
+                    postNotification(notification)
+                }
             }
+            is DataSourceAssembler.Result.AppAttributes -> {
+                Log.i(TAG, "App name: ${result.appIdentifier} = \"${result.displayName}\"")
+                appNames.save(result.appIdentifier, result.displayName)
+            }
+            null -> Unit
         }
     }
 
     private fun startRequestProcessor() {
         requestProcessorJob = scope.launch {
             for (request in attributeRequestQueue) {
-                processAttributeRequest(request)
+                when (request) {
+                    is AttributeRequest -> processAttributeRequest(request)
+                    is AppNameRequest -> processAppNameRequest(request)
+                }
             }
         }
     }
@@ -452,6 +473,17 @@ class AncsService : Service() {
 
         // The response will come asynchronously via dataSourceEvents -> handleDataSourceEvent
         // We add a small delay before processing the next request to allow the DS response to complete
+        kotlinx.coroutines.delay(500)
+    }
+
+    private suspend fun processAppNameRequest(request: AppNameRequest) {
+        dataSourceAssembler.expectAppAttributes(request.appIdentifier)
+        val cpData = ControlPointWriter.buildGetAppAttributes(request.appIdentifier)
+        lastAncsActivityMs = System.currentTimeMillis()
+        if (!writeControlPointWithRetry(cpData)) {
+            Log.w(TAG, "Failed to request the app name of ${request.appIdentifier}")
+            dataSourceAssembler.reset()
+        }
         kotlinx.coroutines.delay(500)
     }
 
@@ -520,17 +552,27 @@ class AncsService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Layout: contentTitle = sender, contentText = message preview, subText = app name
-        val senderName = notification.title.ifEmpty { notification.appDisplayName ?: notification.appIdentifier }
-        val messagePreview = notification.message.ifEmpty { notification.subtitle ?: "" }
+        // Look: the sender (or the app, for app alerts) with a colored initials
+        // avatar, the app's accent color on the icon, and the app name as subtext.
+        val displayAppName = appName ?: notification.appIdentifier
+        val look = NotificationLook.content(updatedNotification, displayAppName)
+        val accent = NotificationLook.accentColor(notification.appIdentifier, notification.categoryId)
+        val avatarColor = if (look.senderIsApp) accent else NotificationLook.avatarColor(look.senderName)
+        val sender = Person.Builder()
+            .setName(look.senderName)
+            .setKey("${notification.appIdentifier}/${look.senderName}")
+            .setIcon(NotificationAvatars.icon(look.senderName, avatarColor))
+            .build()
+        val text = messageText(look, displayAppName)
         val notifTime = parseAncsDate(notification.date)
 
         val builder = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(iconResId)
-            .setContentTitle(senderName)
-            .setContentText(messagePreview)
-            .setSubText(appName ?: notification.appIdentifier)
-            .setTicker("$senderName: $messagePreview")
+            .setColor(accent)
+            .setContentTitle(look.conversationTitle ?: look.senderName)
+            .setContentText(text)
+            .setSubText(displayAppName)
+            .setTicker("${look.senderName}: $text")
             .setWhen(notifTime)
             .setShowWhen(true)
             .setAutoCancel(true)
@@ -544,25 +586,18 @@ class AncsService : Service() {
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_ALL)
             .setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI)
 
-        // MessagingStyle — Samsung One UI Watch renders this with message body
-        // in the heads-up overlay, matching native Android-paired notification style.
-        // BigTextStyle only shows body in expanded view, not the overlay.
-        if (messagePreview.isNotEmpty()) {
-            val person = androidx.core.app.Person.Builder()
-                .setName(senderName)
-                .build()
-            builder.setStyle(
-                NotificationCompat.MessagingStyle(person)
-                    .addMessage(messagePreview, notifTime, person)
-            )
-        } else if (notification.message.isNotEmpty()) {
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText(notification.message)
-                    .setBigContentTitle(senderName)
-                    .setSummaryText(appName)
-            )
+        // MessagingStyle for everything — Samsung One UI Watch only shows the body
+        // in the heads-up overlay for MessagingStyle (gotcha 14).
+        val self = Person.Builder()
+            .setName(getString(R.string.notification_self))
+            .setKey("self")
+            .build()
+        val style = NotificationCompat.MessagingStyle(self)
+            .addMessage(text, notifTime, sender)
+        look.conversationTitle?.let { group ->
+            style.setConversationTitle(group).setGroupConversation(true)
         }
+        builder.setStyle(style)
 
         // Add action buttons if available
         if (notification.positiveActionLabel != null) {
@@ -598,6 +633,25 @@ class AncsService : Service() {
 
         notificationManager.notify(notifId, builder.build())
         activeNotificationIds.addLast(notifId)
+
+        // Learn the app's real (localized) name for the next notifications.
+        if (appNames.shouldRequest(notification.appIdentifier)) {
+            attributeRequestQueue.send(AppNameRequest(notification.appIdentifier))
+        }
+    }
+
+    /** The message line: an emphasized headline (subject or alert title) above the body. */
+    private fun messageText(look: NotificationLook.Content, appName: String): CharSequence {
+        val headline = look.headline
+        val body = look.body
+        return when {
+            headline == null -> body.ifEmpty { appName }
+            body.isEmpty() -> headline
+            else -> SpannableStringBuilder()
+                .append(headline, StyleSpan(Typeface.BOLD), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                .append('\n')
+                .append(body)
+        }
     }
 
     /**
@@ -725,20 +779,8 @@ class AncsService : Service() {
         activeNotificationIds.remove(notifId)
     }
 
-    private fun resolveAppName(appIdentifier: String): String? {
-        if (appIdentifier.isEmpty()) return null
-        appNameCache[appIdentifier]?.let { return it }
-
-        // For now, derive a readable name from the bundle ID
-        // A full implementation would use GetAppAttributes, but that requires
-        // another CP/DS round trip. We use a simple mapping instead.
-        val name = knownAppNames[appIdentifier] ?: run {
-            // Extract last component: "com.apple.MobileSMS" -> "MobileSMS"
-            appIdentifier.substringAfterLast(".")
-        }
-        appNameCache[appIdentifier] = name
-        return name
-    }
+    private fun resolveAppName(appIdentifier: String): String? =
+        if (appIdentifier.isEmpty()) null else appNames.displayName(appIdentifier)
 
     private fun buildNotificationText(notification: AncsNotification): String {
         return buildString {
@@ -794,118 +836,4 @@ class AncsService : Service() {
             .setSilent(true)
             .build()
     }
-
-    private val knownAppNames = mapOf(
-        // Apple Apps
-        "com.apple.MobileSMS" to "Messages",
-        "com.apple.mobilephone" to "Phone",
-        "com.apple.mobilemail" to "Mail",
-        "com.apple.mobilecal" to "Calendar",
-        "com.apple.facetime" to "FaceTime",
-        "com.apple.reminders" to "Reminders",
-        "com.apple.news" to "News",
-        "com.apple.mobilenotes" to "Notes",
-        "com.apple.Health" to "Health",
-        "com.apple.Fitness" to "Fitness",
-        "com.apple.weather" to "Weather",
-        "com.apple.Maps" to "Maps",
-        "com.apple.Music" to "Music",
-        "com.apple.stocks" to "Stocks",
-        "com.apple.camera" to "Camera",
-        "com.apple.Passbook" to "Wallet",
-        "com.apple.Preferences" to "Settings",
-        "com.apple.mobiletimer" to "Clock",
-        "com.apple.podcasts" to "Podcasts",
-        "com.apple.findmy" to "Find My",
-        "com.apple.Photos" to "Photos",
-        "com.apple.TestFlight" to "TestFlight",
-        "com.apple.AppStore" to "App Store",
-        "com.apple.Passwords" to "Passwords",
-        "com.apple.tips" to "Tips",
-        "com.apple.shortcuts" to "Shortcuts",
-        "com.apple.Home" to "Home",
-        "com.apple.iBooks" to "Books",
-        "com.apple.tv" to "TV",
-        "com.apple.ScreenTimeNotifications" to "Screen Time",
-
-        // Messaging
-        "net.whatsapp.WhatsApp" to "WhatsApp",
-        "net.whatsapp.WhatsAppSMB" to "WhatsApp Business",
-        "org.telegram.Telegram" to "Telegram",
-        "com.facebook.Messenger" to "Messenger",
-        "org.whispersystems.signal" to "Signal",
-        "com.slack.Slack" to "Slack",
-        "com.hammerandchisel.discord" to "Discord",
-
-        // Social
-        "com.atebits.Tweetie2" to "X",
-        "com.burbn.instagram" to "Instagram",
-        "com.facebook.Facebook" to "Facebook",
-        "com.linkedin.LinkedIn" to "LinkedIn",
-        "com.zhiliaoapp.musically" to "TikTok",
-        "com.toyopagroup.picaboo" to "Snapchat",
-        "com.burbn.barcelona" to "Threads",
-        "com.reddit.Reddit" to "Reddit",
-
-        // Email & Productivity
-        "com.google.Gmail" to "Gmail",
-        "com.microsoft.Office.Outlook" to "Outlook",
-        "com.google.calendar" to "Google Calendar",
-        "notion.id" to "Notion",
-        "com.grammarly.keyboard" to "Grammarly",
-
-        // Google Apps
-        "com.google.GoogleMobile" to "Google",
-        "com.google.Maps" to "Google Maps",
-        "com.google.Drive" to "Google Drive",
-        "com.google.Photos" to "Google Photos",
-        "com.google.photos" to "Google Photos",
-        "com.google.Home" to "Google Home",
-        "com.google.chrome.ios" to "Chrome",
-        "com.google.ios.youtube" to "YouTube",
-
-        // Entertainment & Media
-        "com.spotify.client" to "Spotify",
-        "com.shazam.Shazam" to "Shazam",
-
-        // Ride-sharing & Delivery
-        "com.ubercab.UberClient" to "Uber",
-        "com.ubercab.UberEats" to "Uber Eats",
-
-        // Finance & Banking
-        "au.com.westpac.ConsultWPC" to "Westpac",
-        "au.com.westpac.banking" to "Westpac",
-        "com.stake.stake" to "Stake",
-        "au.com.hellostake" to "Stake",
-        "com.afterpay.afterpay-consumer" to "Afterpay",
-
-        // Health & Fitness
-        "com.anytimefitness.club" to "Anytime Fitness",
-        "com.anytimefitness.atfmobile" to "Anytime Fitness",
-        "au.com.hotdoc.app" to "HotDoc",
-        "com.hotdoc.patient" to "HotDoc",
-
-        // Telecom
-        "com.jio.myjio" to "Jio",
-        "com.ril.ajio" to "Jio",
-
-        // Shopping & Services
-        "au.com.auspost" to "AusPost",
-        "com.auspost.MyPost" to "AusPost",
-
-        // Smart Home
-        "com.philips.hue.gen4" to "Hue",
-        "com.signify.hue.blue" to "Hue",
-
-        // Gaming
-        "com.microsoft.smartglass" to "Xbox",
-        "com.microsoft.xboxapp" to "Xbox",
-
-        // VPN
-        "com.surfshark.vpnclient" to "Surfshark",
-
-        // Other
-        "com.producthunt.ProductHuntApp" to "Product Hunt",
-        "com.github.stormcrow" to "GitHub",
-    )
 }

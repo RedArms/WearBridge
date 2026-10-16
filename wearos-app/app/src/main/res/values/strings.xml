@@ -18,4 +18,6 @@
     <string name="bluetooth_required">Bluetooth is required</string>
     <string name="notification_action_positive">Accept</string>
     <string name="notification_action_negative">Dismiss</string>
+    <!-- How the watch wearer is named in mirrored conversations -->
+    <string name="notification_self">You</string>
 </resources>
