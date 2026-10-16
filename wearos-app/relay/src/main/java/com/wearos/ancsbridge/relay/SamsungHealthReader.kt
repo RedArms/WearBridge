@@ -44,8 +44,11 @@ class SamsungHealthReader(context: Context) {
         /** A user-facing explanation for SDK errors, or null for anything else. */
         fun explain(error: Throwable): String? = when {
             error !is HealthDataException -> null
-            error.errorCode == ErrorCode.ERR_ACCESS_CONTROL ->
-                "Turn on developer mode in Samsung Health: Settings → About Samsung Health → " +
+            // 2003 "Could not get policy": the app isn't registered with Samsung,
+            // which is expected; developer mode is what lets it read anyway.
+            error.errorCode == ErrorCode.ERR_ACCESS_CONTROL ||
+                error.javaClass.simpleName == "AuthorizationException" ->
+                "Samsung Health developer mode is off: Settings → About Samsung Health → " +
                     "tap the version 10 times → Developer mode (Samsung Health Data SDK) → on."
             error.errorCode == ErrorCode.ERR_NO_USER_PERMISSION ->
                 "Samsung Health access not granted. Tap \"Grant Samsung Health access\"."
