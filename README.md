@@ -29,6 +29,7 @@ iPhone (iOS 26)                       Wear OS Watch
 - **Auto-reconnection** — exponential backoff with `autoConnect` for bonded devices
 - **Boot persistence** — service auto-starts on watch reboot
 - **Haptic feedback** — category-aware vibration patterns via direct Vibrator API (50ms for messages, double-tap for calls)
+- **Gentle wake-up alarm** — when the iPhone's wake-up alarm rings, the watch vibrates too, starting barely noticeable and growing over a minute, with a full-screen Stop button
 - **No cloud dependency** — everything runs over local BLE
 - **iOS companion app** — single-screen status UI with auto-detection of connected watches, "How it Works" explainer, and iOS 26 icon theming
 
@@ -96,6 +97,17 @@ Open `ios-app/AncsBridge.xcodeproj` in Xcode and build. The companion app provid
 3. Select your iPhone from the device list
 4. Accept the Bluetooth pairing dialog on the iPhone
 5. Notifications will start mirroring automatically
+
+### Gentle wake-up alarm (optional, needs the iOS companion app)
+
+The iPhone side is iOS's own **Sleep Schedule** wake-up alarm (Clock → Alarms → Sleep | Wake Up, or Health → Sleep): its sounds start softly and get louder. The watch follows it with a vibration that starts barely noticeable and grows over about a minute, through Bedtime mode.
+
+iOS doesn't let apps see alarms, so two Shortcuts automations tell the watch (Shortcuts → Automation → New → Alarm):
+
+1. **Wake-up alarm goes off** → *Run Immediately* → action **Ring Watch Alarm** (WearBridge)
+2. **Wake-up alarm is stopped** (and a second one for **is snoozed**) → *Run Immediately* → action **Stop Watch Alarm** (WearBridge)
+
+Stopping the alarm on the iPhone stops the watch. Stopping it on the watch stops the watch; it also stops the iPhone alarm when the iPhone sends its alarms over ANCS (some iPhones don't). If they do, the watch also starts its alarm on its own, without the automations.
 
 ## Supported Apps
 

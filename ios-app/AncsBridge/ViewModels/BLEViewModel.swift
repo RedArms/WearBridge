@@ -3,7 +3,7 @@ import CoreBluetooth
 import Combine
 
 class BLEViewModel: ObservableObject {
-    let peripheralManager = PeripheralManager()
+    let peripheralManager = PeripheralManager.shared
 
     private var cancellables = Set<AnyCancellable>()
 

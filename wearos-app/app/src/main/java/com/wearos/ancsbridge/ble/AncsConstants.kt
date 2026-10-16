@@ -26,6 +26,11 @@ object AncsConstants {
     const val CALL_STATE_ACTIVE: Byte = 0x02
     const val CALL_STATE_ENDED: Byte = 0x03
 
+    // Wake Alarm Characteristic UUID (readable, notifiable — iPhone says its wake-up alarm rings)
+    val WAKE_ALARM_CHARACTERISTIC_UUID: UUID = UUID.fromString("A0E3D5B6-4C6F-4E8A-9B2D-7F1E3A5C8D0B")
+    const val WAKE_ALARM_STOPPED: Byte = 0x00
+    const val WAKE_ALARM_RINGING: Byte = 0x01
+
     // ANCS Characteristic UUIDs
     val NOTIFICATION_SOURCE_UUID: UUID = UUID.fromString("9FBF120D-6301-42D9-8C58-25E699A21DBD")
     val CONTROL_POINT_UUID: UUID = UUID.fromString("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9")

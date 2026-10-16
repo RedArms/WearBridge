@@ -18,4 +18,8 @@
     <string name="bluetooth_required">Bluetooth is required</string>
     <string name="notification_action_positive">Accept</string>
     <string name="notification_action_negative">Dismiss</string>
+    <string name="wake_alarm_title">Wake up</string>
+    <string name="wake_alarm_text">Your iPhone alarm is ringing</string>
+    <string name="wake_alarm_stop">Stop</string>
+    <string name="wake_alarm_snooze">Snooze</string>
 </resources>

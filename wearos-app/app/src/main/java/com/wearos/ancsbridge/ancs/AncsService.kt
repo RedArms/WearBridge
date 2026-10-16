@@ -13,6 +13,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.wearos.ancsbridge.AncsApplication
 import com.wearos.ancsbridge.R
+import com.wearos.ancsbridge.alarm.ClockAlarm
+import com.wearos.ancsbridge.alarm.WakeAlarm
 import com.wearos.ancsbridge.ble.AncsConstants
 import com.wearos.ancsbridge.ble.BleConnectionManager
 import com.wearos.ancsbridge.ble.BleScanner
@@ -56,9 +58,18 @@ class AncsService : Service() {
         const val ACTION_PERFORM_NOTIFICATION_ACTION = "com.wearos.ancsbridge.PERFORM_ACTION"
         const val ACTION_SEND_QUICK_REPLY = "com.wearos.ancsbridge.QUICK_REPLY"
         const val ACTION_CLEAR_ALL = "com.wearos.ancsbridge.CLEAR_ALL"
+        const val ACTION_STOP_WAKE_ALARM = "com.wearos.ancsbridge.STOP_WAKE_ALARM"
+        const val EXTRA_SNOOZE = "snooze"
         const val EXTRA_DEVICE_ADDRESS = "device_address"
         const val EXTRA_ACTION_ID = "action_id"
         const val EXTRA_QUICK_REPLY_TEXT = "quick_reply_text"
+
+        /** Stops the wake-up alarm from the watch (and the iPhone's, when ANCS lets us). */
+        fun stopWakeAlarmIntent(context: android.content.Context, snooze: Boolean): Intent =
+            Intent(context, AncsService::class.java).apply {
+                action = ACTION_STOP_WAKE_ALARM
+                putExtra(EXTRA_SNOOZE, snooze)
+            }
         const val NOTIFICATION_ID_CALL = 999
         private const val MAX_ACTIVE_NOTIFICATIONS = 20 // Android limit is 25; keep headroom
 
@@ -85,6 +96,8 @@ class AncsService : Service() {
     // in the first 60 seconds after subscribing (they're backlog, not truly new)
     private var subscriptionTime = 0L
     private var activeCallUid: Long = -1
+    /** The ringing iPhone Clock alarm, when ANCS delivers it (not all iPhones do). */
+    @Volatile private var clockAlarm: ClockAlarm? = null
     private val reconnectionGracePeriodMs = 60_000L
 
     // Serial queue for Control Point requests
@@ -130,6 +143,12 @@ class AncsService : Service() {
         scope.launch {
             connectionManager.callStateEvents.collect { data ->
                 handleCompanionCallState(data)
+            }
+        }
+
+        scope.launch {
+            connectionManager.wakeAlarmEvents.collect { data ->
+                handleCompanionWakeAlarm(data)
             }
         }
 
@@ -194,6 +213,15 @@ class AncsService : Service() {
                 val payload = "$callerName|$replyText"
                 Log.i(TAG, "Sending quick reply via BLE: $payload")
                 connectionManager.writeQuickReply(payload)
+            }
+            ACTION_STOP_WAKE_ALARM -> {
+                WakeAlarm.stop(this)
+                // Stop (or snooze) the iPhone alarm too, if ANCS gave us its actions.
+                clockAlarm?.let { alarm ->
+                    val snooze = intent.getBooleanExtra(EXTRA_SNOOZE, false)
+                    val actionId = if (snooze) alarm.snoozeActionId ?: alarm.stopActionId else alarm.stopActionId
+                    if (actionId != null) performNotificationAction(alarm.uid, actionId)
+                }
             }
             ACTION_CLEAR_ALL -> {
                 Log.i(TAG, "Clearing all notifications (${activeNotificationIds.size} tracked)")
@@ -309,6 +337,12 @@ class AncsService : Service() {
                 }
             }
             event.isRemoved -> {
+                // The iPhone alarm was stopped or snoozed there: stop the watch alarm too.
+                if (clockAlarm?.uid == event.notificationUid) {
+                    clockAlarm = null
+                    WakeAlarm.stop(this)
+                }
+
                 // Cancel the Android notification and remove from tracking
                 val removedId = notificationIdForUid(event.notificationUid)
                 notificationManager.cancel(removedId)
@@ -461,6 +495,18 @@ class AncsService : Service() {
         // Skip pre-existing notifications — they're already on the phone.
         if (isPreExisting) {
             Log.d(TAG, "Skipping pre-existing notification uid=${notification.uid}")
+            return
+        }
+
+        // A ringing iPhone Clock alarm becomes the watch's gentle wake-up alarm.
+        ClockAlarm.from(
+            notification.uid, notification.appIdentifier,
+            notification.positiveActionLabel, notification.negativeActionLabel
+        )?.let { alarm ->
+            Log.i(TAG, "iPhone Clock alarm uid=${alarm.uid} " +
+                "(${alarm.positiveActionLabel} / ${alarm.negativeActionLabel})")
+            clockAlarm = alarm
+            WakeAlarm.start(this, snoozeAvailable = alarm.snoozeActionId != null)
             return
         }
 
@@ -661,11 +707,26 @@ class AncsService : Service() {
     }
 
 
+    /** The companion app says the iPhone's wake-up alarm rings (0x01) or stopped (0x00). */
+    private fun handleCompanionWakeAlarm(data: ByteArray) {
+        if (data.isEmpty()) return
+        when (data[0]) {
+            AncsConstants.WAKE_ALARM_RINGING -> {
+                Log.i(TAG, "Companion: iPhone wake-up alarm ringing")
+                WakeAlarm.start(this, snoozeAvailable = clockAlarm?.snoozeActionId != null)
+            }
+            AncsConstants.WAKE_ALARM_STOPPED -> {
+                Log.i(TAG, "Companion: iPhone wake-up alarm stopped")
+                WakeAlarm.stop(this)
+            }
+        }
+    }
+
     private fun performNotificationAction(uid: Long, actionId: Int) {
         val data = ControlPointWriter.buildPerformNotificationAction(uid, actionId)
         connectionManager.writeControlPoint(data)
         // Cancel vibration (in case this is a call answer/decline)
-        vibrator.cancel()
+        if (!WakeAlarm.isRinging) vibrator.cancel()
         // Cancel the Android notification and remove from tracking
         val notifId = notificationIdForUid(uid)
         notificationManager.cancel(notifId)

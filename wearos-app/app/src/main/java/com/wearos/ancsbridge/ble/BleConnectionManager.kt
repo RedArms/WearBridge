@@ -53,6 +53,9 @@ class BleConnectionManager(private val context: Context) {
     private val _callStateEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 16)
     val callStateEvents: SharedFlow<ByteArray> = _callStateEvents.asSharedFlow()
 
+    private val _wakeAlarmEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
+    val wakeAlarmEvents: SharedFlow<ByteArray> = _wakeAlarmEvents.asSharedFlow()
+
     private var gatt: BluetoothGatt? = null
     private var targetDevice: BluetoothDevice? = null
     private var reconnectJob: Job? = null
@@ -196,10 +199,11 @@ class BleConnectionManager(private val context: Context) {
                     readGapDeviceName()
                     // Read companion status to notify iPhone app
                     readCompanionStatus()
-                    // Subscribe to call state from companion app (if available)
+                    // Subscribe to call state and wake alarm from companion app (if available)
                     scope.launch {
                         delay(500) // Small delay to avoid GATT queue congestion
                         subscribeToCallState()
+                        subscribeToWakeAlarm()
                     }
                 }
             }
@@ -222,6 +226,9 @@ class BleConnectionManager(private val context: Context) {
         },
         onCallStateChanged = { data ->
             _callStateEvents.tryEmit(data)
+        },
+        onWakeAlarmChanged = { data ->
+            _wakeAlarmEvents.tryEmit(data)
         }
     )
 
@@ -398,6 +405,21 @@ class BleConnectionManager(private val context: Context) {
         }
         subscribeToCharacteristic(char)
         Log.i(TAG, "Subscribing to call state characteristic")
+    }
+
+    /**
+     * Subscribe to the wake alarm characteristic: the companion app says when the
+     * iPhone's wake-up alarm rings and stops (driven by a Shortcuts automation).
+     */
+    fun subscribeToWakeAlarm() {
+        val gatt = this.gatt ?: return
+        val char = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID)
+            ?.getCharacteristic(AncsConstants.WAKE_ALARM_CHARACTERISTIC_UUID) ?: run {
+            Log.d(TAG, "subscribeToWakeAlarm: wake alarm characteristic not found")
+            return
+        }
+        subscribeToCharacteristic(char)
+        Log.i(TAG, "Subscribing to wake alarm characteristic")
     }
 
     /**

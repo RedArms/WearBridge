@@ -13,6 +13,9 @@ import os.log
 /// connection status tracking.
 class PeripheralManager: NSObject, ObservableObject {
 
+    /// One instance for the app and its App Intents (Shortcuts automations can launch the app in the background).
+    static let shared = PeripheralManager()
+
     private let logger = Logger(subsystem: "com.wearos.ancsbridge", category: "PeripheralManager")
 
     private var peripheralManager: CBPeripheralManager!
@@ -27,7 +30,11 @@ class PeripheralManager: NSObject, ObservableObject {
     private var companionService: CBMutableService?
     private var statusCharacteristic: CBMutableCharacteristic?
     private var callStateCharacteristic: CBMutableCharacteristic?
+    private var wakeAlarmCharacteristic: CBMutableCharacteristic?
+    private var wakeAlarmState = BLEConstants.wakeAlarmStopped
     private var serviceAdded = false
+    /// Set when state restoration brought back a companion service from an older version of the app.
+    private var needsServiceRebuild = false
     private var scanTimer: Timer?
 
     /// Monitors phone call state via CallKit for live call status sync
@@ -49,7 +56,7 @@ class PeripheralManager: NSObject, ObservableObject {
         "ancs"  // Our own app's advertised name during pairing
     ]
 
-    override init() {
+    private override init() {
         super.init()
         peripheralManager = CBPeripheralManager(
             delegate: self,
@@ -96,6 +103,38 @@ class PeripheralManager: NSObject, ObservableObject {
         default: stateStr = "idle"
         }
         logger.info("Call state BLE notify: \(stateStr), sent=\(sent)")
+    }
+
+    // MARK: - Wake Alarm
+
+    /// Tells the watch that the iPhone's wake-up alarm is ringing or stopped, so it
+    /// starts or stops its gentle vibration alarm. Called from the Shortcuts automation
+    /// intents (see WakeAlarmIntents.swift). Returns false if the watch couldn't be told.
+    @MainActor
+    func setWakeAlarm(ringing: Bool) async -> Bool {
+        wakeAlarmState = ringing ? BLEConstants.wakeAlarmRinging : BLEConstants.wakeAlarmStopped
+        // When an automation launched the app, Bluetooth and the restored service need a moment.
+        var waited = 0
+        while (peripheralManager.state != .poweredOn || wakeAlarmCharacteristic == nil) && waited < 50 {
+            try? await Task.sleep(for: .milliseconds(100))
+            waited += 1
+        }
+        guard peripheralManager.state == .poweredOn, let characteristic = wakeAlarmCharacteristic else {
+            logger.error("Wake alarm: Bluetooth or the companion service isn't ready")
+            return false
+        }
+        let data = Data([wakeAlarmState])
+        for _ in 0..<5 {
+            // False only while the transmit queue is full.
+            if peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: nil) {
+                let subscribers = characteristic.subscribedCentrals?.count ?? 0
+                logger.info("Wake alarm BLE notify: \(ringing ? "ringing" : "stopped"), \(subscribers) watch(es) subscribed")
+                return subscribers > 0
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        logger.error("Wake alarm: couldn't notify the watch")
+        return false
     }
 
     // MARK: - Connected Watch Discovery
@@ -249,11 +288,23 @@ class PeripheralManager: NSObject, ObservableObject {
             permissions: [.readable]
         )
 
+        wakeAlarmCharacteristic = CBMutableCharacteristic(
+            type: BLEConstants.wakeAlarmCharacteristicUUID,
+            properties: [.read, .notify],
+            value: nil,
+            permissions: [.readable]
+        )
+
         companionService = CBMutableService(
             type: BLEConstants.companionServiceUUID,
             primary: true
         )
-        companionService?.characteristics = [statusCharacteristic!, quickReplyCharacteristic, callStateCharacteristic!]
+        companionService?.characteristics = [
+            statusCharacteristic!,
+            quickReplyCharacteristic,
+            callStateCharacteristic!,
+            wakeAlarmCharacteristic!,
+        ]
 
         peripheralManager.add(companionService!)
         serviceAdded = true
@@ -270,6 +321,12 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
 
         switch peripheral.state {
         case .poweredOn:
+            if needsServiceRebuild {
+                // Restored service predates the wake alarm characteristic; publish the current one.
+                peripheral.removeAllServices()
+                serviceAdded = false
+                needsServiceRebuild = false
+            }
             setupServices()
             if settingsStore.autoAdvertise {
                 startAdvertising()
@@ -305,6 +362,9 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
             peripheral.respond(to: request, withResult: .success)
         } else if request.characteristic.uuid == BLEConstants.callStateCharacteristicUUID {
             request.value = Data([callStateObserver.currentState])
+            peripheral.respond(to: request, withResult: .success)
+        } else if request.characteristic.uuid == BLEConstants.wakeAlarmCharacteristicUUID {
+            request.value = Data([wakeAlarmState])
             peripheral.respond(to: request, withResult: .success)
         } else {
             peripheral.respond(to: request, withResult: .attributeNotFound)
@@ -343,6 +403,21 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
         logger.info("Restoring peripheral manager state")
         if let services = dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService] {
             serviceAdded = !services.isEmpty
+            let restoredCharacteristics = services.flatMap { $0.characteristics ?? [] }
+            let hasWakeAlarmCharacteristic = restoredCharacteristics.contains {
+                $0.uuid == BLEConstants.wakeAlarmCharacteristicUUID
+            }
+            needsServiceRebuild = serviceAdded && !hasWakeAlarmCharacteristic
+            // Keep handles on the restored characteristics, or notifications to the watch
+            // (call state, wake alarm) would silently stop after a relaunch.
+            for case let characteristic as CBMutableCharacteristic in restoredCharacteristics {
+                switch characteristic.uuid {
+                case BLEConstants.connectionStatusUUID: statusCharacteristic = characteristic
+                case BLEConstants.callStateCharacteristicUUID: callStateCharacteristic = characteristic
+                case BLEConstants.wakeAlarmCharacteristicUUID: wakeAlarmCharacteristic = characteristic
+                default: break
+                }
+            }
         }
         if peripheral.isAdvertising {
             isAdvertising = true
