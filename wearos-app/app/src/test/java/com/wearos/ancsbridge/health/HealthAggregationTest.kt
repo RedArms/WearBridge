@@ -22,7 +22,10 @@ class HealthAggregationTest {
 
         val awake = SleepSessions.onStateChange(asleep.asleepSinceEpochSec, isAsleep = false, atEpochSec = 1_000 + 7 * 3600)
         assertNull(awake.asleepSinceEpochSec)
-        assertEquals(HealthRecord(HealthProtocol.TYPE_SLEEP, 1_000, 1_000 + 7 * 3600, 0.0), awake.session)
+        assertEquals(
+            HealthRecord(HealthProtocol.TYPE_SLEEP, 1_000, 1_000 + 7 * 3600, HealthProtocol.SLEEP_STAGE_WATCH.toDouble()),
+            awake.session
+        )
     }
 
     @Test

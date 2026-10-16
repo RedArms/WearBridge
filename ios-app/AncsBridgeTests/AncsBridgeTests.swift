@@ -61,6 +61,7 @@ final class HealthProtocolTests: XCTestCase {
             (HealthProtocol.sleepStageLight, .asleepCore),
             (HealthProtocol.sleepStageDeep, .asleepDeep),
             (HealthProtocol.sleepStageREM, .asleepREM),
+            (HealthProtocol.sleepStageWatch, .asleepUnspecified),
         ]
         for (stage, value) in expected {
             let record = HealthRecord(type: HealthProtocol.typeSleep, start: 100, end: 200, value: Double(stage))

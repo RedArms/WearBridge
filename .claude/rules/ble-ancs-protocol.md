@@ -72,7 +72,7 @@ Opt-in on both sides: **Health Sync** on the watch, **Settings → Apple Health*
 
 1. Watch: `HealthMonitoring` registers `HealthPassiveListenerService` with Health Services (heart rate, steps, distance, floors, "asleep" activity state). Registration is redone on every `AncsService` start because Health Services forgets it on reboot.
 2. Watch: records go to `HealthRecordStore`, a fixed-record file queue (`health_queue.bin`, capped at 50k records).
-3. Watch: `HealthSyncManager` flushes 10 s after connecting, once a full write's worth of new data is queued, and every 15 min, but never while a call rings or within 3 s of ANCS activity (every GATT write can buzz the watch, gotcha 10). One write-with-response at a time, sized to the MTU (max 30 records); confirmed records leave the queue in chunks of up to 20 writes.
+3. Watch: `HealthSyncManager` flushes 10 s after connecting, once a full write's worth of new data is queued, and every 15 min, but never while a call rings or within 3 s of ANCS activity (every GATT write can buzz the watch, gotcha 10). One write-with-response at a time, sized to the MTU (max 30 records), at most 25 writes per flush (a backlog drains every 2 min); confirmed records leave the queue in chunks of up to 20 writes. After the iPhone refuses a batch (Apple Health sync off), it waits 30 min or the next connection.
 4. iPhone: `PeripheralManager` decodes the batch, stages it on disk (`HealthKitWriter`, file protection *until first user authentication*), then responds `.success`. It responds `.requestNotSupported` when Apple Health sync is off, so the watch keeps its queue.
 5. iPhone: staged records are saved to HealthKit when it is writable (HealthKit is locked with the phone): right away, on unlock, on app foreground, or with the next batch. Samples of types the user denied in Health are dropped; a type still undetermined holds the queue until the app is opened, which shows the permission sheet again.
 
@@ -82,12 +82,12 @@ Wire format (little-endian), mirrored in `HealthProtocol.kt` / `HealthProtocol.s
 Batch  := version:u8 (=1) | count:u8 (1..255) | Record × count
 Record := type:u8 | start:u32 (Unix s) | end:u32 (Unix s) | value:f64     (17 bytes)
 type   := 1 heart rate (bpm) | 2 steps | 3 distance (m) | 4 floors
-        | 5 sleep (value = stage: 0 unspecified, 1 awake, 2 light, 3 deep, 4 REM)
+        | 5 sleep (value = stage: 0 unspecified, 1 awake, 2 light, 3 deep, 4 REM, 5 watch "asleep" state)
         | 6 in bed (whole session, value = sleep score 0..100, 0 = none)
         | 7 SpO2 (%) | 8 blood pressure (value = systolic * 1000 + diastolic, mmHg)
 ```
 
-HealthKit mapping: 5 → sleepAnalysis asleepUnspecified/awake/asleepCore/asleepDeep/asleepREM, 6 → inBed (score in `WearBridgeSleepScore` metadata), 7 → oxygenSaturation (fraction), 8 → bloodPressure correlation (systolic + diastolic). HealthKit can't take skin temperature (`appleSleepingWristTemperature` is read-only) or ECG from third-party apps.
+HealthKit mapping: 5 → sleepAnalysis asleepUnspecified/awake/asleepCore/asleepDeep/asleepREM (stage 5: asleepUnspecified tagged `WearBridgeWatchSleep`), 6 → inBed (score in `WearBridgeSleepScore` metadata), 7 → oxygenSaturation (fraction), 8 → bloodPressure correlation (systolic + diastolic). HealthKit can't take skin temperature (`appleSleepingWristTemperature` is read-only) or ECG from third-party apps.
 
 Every HealthKit sample gets `HKMetadataKeySyncIdentifier = wearbridge.<type>.<start>.<end>` (version 1), so batches resent after a lost acknowledgement are not duplicated.
 
@@ -99,8 +99,8 @@ Health Services only exposes an "asleep" state. Samsung Health on the paired And
 
 1. `:relay` (phone, same applicationId `com.wearos.ancsbridge` and signing key as the watch app, which the Data Layer requires) reads sleep (sessions, stages, score), SpO2, blood pressure (+ pulse) and heart rate. `RelayWorker` runs hourly via WorkManager, re-reading 36 h before the last success (30 days on the first run); `SentLog` skips records sent in the last 24 h.
 2. Batches (same wire format, ≤255 records) go to the watch with `MessageClient` on path `/wearbridge/health/batch`.
-3. Watch: `HealthRelayListenerService` appends them to the same queue, so they reach the iPhone over the existing BLE link. While the relay is active (data in the last 7 days), the watch stops sending its own basic sleep.
-4. iPhone: before saving a chunk with in-bed sessions, `HealthKitWriter` deletes its own `asleepUnspecified` samples inside those sessions, so staged sleep replaces basic sleep.
+3. Watch: `HealthRelayListenerService` appends them to the same queue, so they reach the iPhone over the existing BLE link. While the relay sends sleep (or heart rate), i.e. it did in the last 3 days, the watch stops sending its own sleep (or heart rate), so Health doesn't get two overlapping copies. The relay re-reads from 36 h before its last success, so it fills any gap when it comes back.
+4. iPhone: before saving a chunk with in-bed sessions, `HealthKitWriter` deletes the watch's own sleep samples (tagged `WearBridgeWatchSleep`) inside those sessions, so staged sleep replaces basic sleep. Relay samples without a stage are kept.
 
 The relay module is only included in the Gradle build when the SDK AAR is in `wearos-app/relay/libs/` (not redistributable, gitignored). The `:shared` module holds `HealthProtocol` for both apps.
 

@@ -108,7 +108,7 @@ What syncs, when the watch supports it: heart rate, steps, walking + running dis
 
 #### Phone relay for Samsung watches (sleep stages, SpO2, blood pressure)
 
-If your Galaxy Watch is also paired with an Android phone running Samsung Health (kept at home is fine), the optional relay app adds what Samsung Health measured: sleep with stages (awake, light → Core, deep, REM) and score, blood oxygen, blood pressure (calibrated with Samsung Health Monitor) and heart rate. It replaces the watch's basic sleep for the same nights.
+If your Galaxy Watch is also paired with an Android phone running Samsung Health (kept at home is fine), the optional relay app adds what Samsung Health measured: sleep with stages (awake, light → Core, deep, REM) and score, blood oxygen, blood pressure (calibrated with Samsung Health Monitor) and heart rate. While it sends sleep and heart rate, the watch leaves those to it, and its staged sleep replaces the watch's basic sleep for the same nights.
 
 1. Download the [Samsung Health Data SDK](https://developer.samsung.com/health/data) and put its AAR in `wearos-app/relay/libs/` (its license doesn't allow committing it).
 2. In Samsung Health on the phone: Settings → About Samsung Health → tap the version 10 times → **Developer mode (Samsung Health Data SDK)** → on.

@@ -6,6 +6,7 @@ import android.util.Log
 import com.wearos.ancsbridge.ble.BleConnectionManager
 import com.wearos.ancsbridge.ble.BleConnectionManager.HealthWriteResult
 import com.wearos.ancsbridge.model.ConnectionState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,6 +48,10 @@ class HealthSyncManager(
         /** Group passive batches; only flush early once a full write is queued. */
         private const val NEW_DATA_DEBOUNCE_MS = 60_000L
         private const val PERIODIC_FLUSH_MS = 15 * 60_000L
+        /** Next flush while a backlog is left, so it drains in small bursts rather than one long one. */
+        private const val BACKLOG_FLUSH_MS = 2 * 60_000L
+        /** After the iPhone refused a batch (e.g. Apple Health sync off), only retry on reconnect or after this. */
+        private const val FAILURE_BACKOFF_MS = 30 * 60_000L
 
         /** How long a flush waits for [canWrite] before giving up until the next one. */
         private const val WRITABLE_WAIT_MS = 10_000L
@@ -55,7 +60,7 @@ class HealthSyncManager(
         private const val BUSY_RETRY_DELAY_MS = 250L
         private const val MAX_BUSY_ATTEMPTS = 8
         private const val PAUSE_BETWEEN_WRITES_MS = 50L
-        private const val MAX_WRITES_PER_FLUSH = 500
+        private const val MAX_WRITES_PER_FLUSH = 25
 
         /** Writes per queue read/ack, so the queue file is rewritten less often. */
         private const val WRITES_PER_ACK = 20
@@ -66,6 +71,8 @@ class HealthSyncManager(
 
     /** When the current connection came up, or 0 while disconnected. */
     @Volatile private var connectedSinceMs = 0L
+    @Volatile private var backlogLeft = false
+    @Volatile private var backoffUntilMs = 0L
 
     fun start() {
         if (job != null) return
@@ -77,6 +84,7 @@ class HealthSyncManager(
                     .collectLatest { connected ->
                         if (connected) {
                             connectedSinceMs = SystemClock.elapsedRealtime()
+                            backoffUntilMs = 0L // a new connection deserves a fresh try
                             delay(SETTLE_AFTER_CONNECT_MS)
                             flush("connected")
                         } else {
@@ -94,8 +102,8 @@ class HealthSyncManager(
             }
             launch {
                 while (isActive) {
-                    delay(PERIODIC_FLUSH_MS)
-                    flush("periodic")
+                    delay(if (backlogLeft) BACKLOG_FLUSH_MS else PERIODIC_FLUSH_MS)
+                    flush(if (backlogLeft) "backlog" else "periodic")
                 }
             }
         }
@@ -128,52 +136,74 @@ class HealthSyncManager(
     private suspend fun flush(reason: String) {
         if (!flushLock.tryLock()) return // a flush is already running
         try {
-            if (!HealthMonitoring.isEnabled(context) || !isSettled()) return
-            val store = HealthMonitoring.store(context)
-            var sent = 0
-            var writes = 0
-            var stop = false
-            while (!stop && writes < MAX_WRITES_PER_FLUSH && isSettled()) {
-                val perWrite = HealthProtocol.maxRecordsPerWrite(connection.negotiatedMtu)
-                val chunk = withContext(Dispatchers.IO) { store.peek(perWrite * WRITES_PER_ACK) }
-                if (chunk.records.isEmpty()) break
-
-                var confirmed = 0
-                while (confirmed < chunk.records.size) {
-                    if (writes >= MAX_WRITES_PER_FLUSH || !awaitWritable()) {
-                        stop = true
-                        break
-                    }
-                    val end = minOf(confirmed + perWrite, chunk.records.size)
-                    val payload = HealthProtocol.encodeBatch(chunk.records.subList(confirmed, end))
-                    when (writeWithRetry(payload)) {
-                        HealthWriteResult.SUCCESS -> {
-                            confirmed = end
-                            writes++
-                            delay(PAUSE_BETWEEN_WRITES_MS)
-                        }
-                        HealthWriteResult.UNSUPPORTED -> {
-                            Log.d(TAG, "Companion app not reachable; keeping queued records")
-                            stop = true
-                        }
-                        HealthWriteResult.BUSY, HealthWriteResult.FAILED -> {
-                            Log.w(TAG, "Health write not acknowledged; will retry later")
-                            stop = true
-                        }
-                    }
-                    if (stop) break
-                }
-                if (confirmed > 0) {
-                    withContext(Dispatchers.IO) { store.ack(chunk, confirmed) }
-                    sent += confirmed
-                }
-            }
-            if (sent > 0) {
-                val left = withContext(Dispatchers.IO) { store.size() }
-                Log.i(TAG, "Sent $sent health records in $writes writes ($reason), $left left")
-            }
+            flushLocked(reason)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The queue file is unreadable or the disk is full: skip this round
+            // rather than crash the service that also runs ANCS.
+            Log.e(TAG, "Health flush failed", e)
         } finally {
             flushLock.unlock()
+        }
+    }
+
+    private suspend fun flushLocked(reason: String) {
+        if (!HealthMonitoring.isEnabled(context) || !isSettled()) return
+        if (SystemClock.elapsedRealtime() < backoffUntilMs) return
+        val store = HealthMonitoring.store(context)
+        var sent = 0
+        var writes = 0
+        var stop = false
+        while (!stop && writes < MAX_WRITES_PER_FLUSH && isSettled()) {
+            val perWrite = HealthProtocol.maxRecordsPerWrite(connection.negotiatedMtu)
+            val chunk = withContext(Dispatchers.IO) { store.peek(perWrite * WRITES_PER_ACK) }
+            if (chunk.records.isEmpty()) break
+
+            var confirmed = 0
+            while (confirmed < chunk.records.size) {
+                if (writes >= MAX_WRITES_PER_FLUSH || !awaitWritable()) {
+                    stop = true
+                    break
+                }
+                val end = minOf(confirmed + perWrite, chunk.records.size)
+                // A record corrupted on disk would make encodeBatch throw on every flush.
+                val batch = chunk.records.subList(confirmed, end).filter(HealthProtocol::isValid)
+                if (batch.isEmpty()) {
+                    confirmed = end
+                    continue
+                }
+                when (writeWithRetry(HealthProtocol.encodeBatch(batch))) {
+                    HealthWriteResult.SUCCESS -> {
+                        confirmed = end
+                        writes++
+                        delay(PAUSE_BETWEEN_WRITES_MS)
+                    }
+                    HealthWriteResult.UNSUPPORTED -> {
+                        Log.d(TAG, "Companion app not reachable; keeping queued records")
+                        stop = true
+                    }
+                    HealthWriteResult.FAILED -> {
+                        Log.w(TAG, "Health write refused or timed out; backing off")
+                        backoffUntilMs = SystemClock.elapsedRealtime() + FAILURE_BACKOFF_MS
+                        stop = true
+                    }
+                    HealthWriteResult.BUSY, HealthWriteResult.TIMEOUT -> {
+                        Log.w(TAG, "Health write not confirmed yet; will retry later")
+                        stop = true
+                    }
+                }
+                if (stop) break
+            }
+            if (confirmed > 0) {
+                withContext(Dispatchers.IO) { store.ack(chunk, confirmed) }
+                sent += confirmed
+            }
+        }
+        val left = withContext(Dispatchers.IO) { store.size() }
+        backlogLeft = sent > 0 && left > 0
+        if (sent > 0) {
+            Log.i(TAG, "Sent $sent health records in $writes writes ($reason), $left left")
         }
     }
 

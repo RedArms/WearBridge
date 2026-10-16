@@ -42,10 +42,16 @@ object HealthMonitoring {
     private const val KEY_ENABLED = "enabled"
     private const val KEY_ASLEEP_SINCE = "asleep_since"
     private const val KEY_DAILY_PREFIX = "daily_total_"
-    private const val KEY_RELAY_LAST_SEEN = "relay_last_seen"
+    // When the phone relay last sent sleep / heart rate. While it does, the watch
+    // leaves those to it, so Apple Health doesn't get two overlapping copies.
+    private const val KEY_RELAY_SLEEP_LAST_SEEN = "relay_sleep_last_seen"
+    private const val KEY_RELAY_HEART_RATE_LAST_SEEN = "relay_heart_rate_last_seen"
 
-    /** While the phone relay sent data this recently, its staged sleep replaces the watch's basic sleep. */
-    private const val RELAY_ACTIVE_WINDOW_MS = 7 * 24 * 3600 * 1000L
+    /**
+     * How long the relay counts as sending a type after its last batch of it. The relay
+     * re-reads from 36 h before its last success, so it fills the gap when it comes back.
+     */
+    private const val RELAY_ACTIVE_WINDOW_MS = 3 * 24 * 3600 * 1000L
     private const val QUEUE_FILE = "health_queue.bin"
     private const val MAX_PLAUSIBLE_BPM = 300.0
 
@@ -189,11 +195,14 @@ object HealthMonitoring {
         val boot = Instant.ofEpochMilli(System.currentTimeMillis() - SystemClock.elapsedRealtime())
         val records = mutableListOf<HealthRecord>()
 
-        for (point in container.getData(DataType.HEART_RATE_BPM)) {
-            val bpm = point.value
-            if (bpm > 0.0 && bpm < MAX_PLAUSIBLE_BPM) {
-                val time = point.getTimeInstant(boot).epochSecond
-                records += HealthRecord(HealthProtocol.TYPE_HEART_RATE, time, time, bpm)
+        // Samsung Health's heart rate comes through the relay when it runs.
+        if (!isRelaySending(context, KEY_RELAY_HEART_RATE_LAST_SEEN)) {
+            for (point in container.getData(DataType.HEART_RATE_BPM)) {
+                val bpm = point.value
+                if (bpm > 0.0 && bpm < MAX_PLAUSIBLE_BPM) {
+                    val time = point.getTimeInstant(boot).epochSecond
+                    records += HealthRecord(HealthProtocol.TYPE_HEART_RATE, time, time, bpm)
+                }
             }
         }
 
@@ -225,7 +234,7 @@ object HealthMonitoring {
             update.session
         }
         if (session != null) {
-            if (isRelayActive(context)) {
+            if (isRelaySending(context, KEY_RELAY_SLEEP_LAST_SEEN)) {
                 // Samsung Health's staged sleep comes through the relay; don't add a second, coarser copy.
                 Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec} skipped (relay active)")
             } else {
@@ -237,16 +246,23 @@ object HealthMonitoring {
 
     /** Records sent by the phone relay (Samsung Health), see HealthRelayListenerService. */
     fun onRelayRecords(context: Context, records: List<HealthRecord>) {
-        prefs(context).edit().putLong(KEY_RELAY_LAST_SEEN, System.currentTimeMillis()).apply()
+        if (records.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val editor = prefs(context).edit()
+        if (records.any { it.type == HealthProtocol.TYPE_IN_BED || it.type == HealthProtocol.TYPE_SLEEP }) {
+            editor.putLong(KEY_RELAY_SLEEP_LAST_SEEN, now)
+        }
+        if (records.any { it.type == HealthProtocol.TYPE_HEART_RATE }) {
+            editor.putLong(KEY_RELAY_HEART_RATE_LAST_SEEN, now)
+        }
+        editor.apply()
         // Keep them even while Health Sync is off: the relay counts them as delivered
         // and won't resend for a day. They are sent once sync is on (turning it off clears the queue).
-        if (records.isEmpty()) return
-        store(context).append(records)
-        _newData.tryEmit(Unit)
+        append(context, records)
     }
 
-    fun isRelayActive(context: Context): Boolean {
-        val lastSeen = prefs(context).getLong(KEY_RELAY_LAST_SEEN, 0L)
+    private fun isRelaySending(context: Context, key: String): Boolean {
+        val lastSeen = prefs(context).getLong(key, 0L)
         return lastSeen > 0L && System.currentTimeMillis() - lastSeen < RELAY_ACTIVE_WINDOW_MS
     }
 
@@ -257,7 +273,17 @@ object HealthMonitoring {
 
     private fun queue(context: Context, records: List<HealthRecord>) {
         if (records.isEmpty() || !isEnabled(context)) return
-        store(context).append(records)
+        append(context, records)
+    }
+
+    private fun append(context: Context, records: List<HealthRecord>) {
+        try {
+            store(context).append(records)
+        } catch (e: Exception) {
+            // A full disk must not take the whole app (and ANCS) down with it.
+            Log.e(TAG, "Couldn't queue ${records.size} health records", e)
+            return
+        }
         _newData.tryEmit(Unit)
     }
 

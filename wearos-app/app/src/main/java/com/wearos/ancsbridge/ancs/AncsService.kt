@@ -65,13 +65,16 @@ class AncsService : Service() {
         const val NOTIFICATION_ID_CALL = 999
         private const val MAX_ACTIVE_NOTIFICATIONS = 20 // Android limit is 25; keep headroom
 
-        // GATT writes fail while another operation (e.g. a health sync write,
-        // at most ~3 s) is in flight, so retry instead of dropping the request.
-        private const val GATT_WRITE_ATTEMPTS = 20
+        // GATT writes fail while another operation (e.g. a health sync write) is
+        // in flight, so retry instead of dropping the request: ~6 s, twice the
+        // health write timeout.
+        private const val GATT_WRITE_ATTEMPTS = 40
         private const val GATT_RETRY_DELAY_MS = 150L
 
         // Health sync stays off the link while a call rings and right after ANCS activity.
         private const val HEALTH_SYNC_QUIET_MS = 3_000L
+        // A call whose end we never heard of (link dropped) stops blocking health sync after this.
+        private const val CALL_BLOCKS_HEALTH_SYNC_MS = 3 * 60_000L
 
         /** Shared connection state observable by the ViewModel */
         private val _sharedConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
@@ -98,6 +101,7 @@ class AncsService : Service() {
     private var subscriptionTime = 0L
     @Volatile private var activeCallUid: Long = -1
     @Volatile private var lastAncsActivityMs = 0L
+    @Volatile private var callStartedMs = 0L
     private val reconnectionGracePeriodMs = 60_000L
 
     // Serial queue for Control Point requests
@@ -175,7 +179,9 @@ class AncsService : Service() {
         // the watch UI). Health Services forgets registrations on reboot, so
         // re-register whenever the service starts.
         healthSync = HealthSyncManager(this, connectionManager, scope) {
-            activeCallUid == -1L && System.currentTimeMillis() - lastAncsActivityMs > HEALTH_SYNC_QUIET_MS
+            val now = System.currentTimeMillis()
+            val callRinging = activeCallUid != -1L && now - callStartedMs < CALL_BLOCKS_HEALTH_SYNC_MS
+            !callRinging && now - lastAncsActivityMs > HEALTH_SYNC_QUIET_MS
         }
         healthSync.start()
         scope.launch { HealthMonitoring.registerIfEnabled(this@AncsService) }
@@ -401,6 +407,7 @@ class AncsService : Service() {
     }
 
     private fun handleDataSourceEvent(data: ByteArray) {
+        lastAncsActivityMs = System.currentTimeMillis()
         val notification = dataSourceAssembler.onDataReceived(data)
         if (notification != null) {
             Log.i(TAG, "Notification complete: ${notification.title} - ${notification.message}")
@@ -420,6 +427,7 @@ class AncsService : Service() {
 
     private suspend fun processAttributeRequest(request: AttributeRequest) {
         val event = request.event
+        lastAncsActivityMs = System.currentTimeMillis() // keeps health sync off while the queue drains
 
         // Prepare the assembler to expect this response
         dataSourceAssembler.expectNotificationAttributes(
@@ -624,6 +632,7 @@ class AncsService : Service() {
             return
         }
         activeCallUid = notification.uid
+        callStartedMs = System.currentTimeMillis()
 
         // 1. Report to Telecom framework — self-managed connection allows
         //    our foreground service to launch activities while ringing

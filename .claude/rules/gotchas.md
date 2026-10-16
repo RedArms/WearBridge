@@ -32,7 +32,7 @@
 
 16. **ANCS doesn't send REMOVE when call is answered**: When an incoming call is answered on iPhone, ANCS sends a MODIFIED event (EventID=1), not REMOVED. REMOVED only comes when the call fully ends. The call overlay must handle MODIFIED to transition to "Active on iPhone" state, otherwise it stays showing "Incoming Call" for the entire call duration.
 
-17. **One GATT operation at a time**: `BluetoothGatt.write*`/`read*` return false while another operation is in flight. Health sync writes share the link with ANCS, so Control Point and quick reply writes are retried for up to 3 s (`retryGattWrite`, longer than a health write can take), CCCD writes are retried from the descriptor queue, and health writes back off on `BUSY` and pause around calls and ANCS activity.
+17. **One GATT operation at a time**: `BluetoothGatt.write*`/`read*` return false while another operation is in flight. Health sync writes share the link with ANCS, so Control Point and quick reply writes are retried for up to 6 s (`retryGattWrite`, twice the health write timeout), CCCD writes are retried from the descriptor queue, and health writes back off on `BUSY` and pause around calls and ANCS activity.
 
 18. **Health Services forgets passive registrations on reboot**: `HealthMonitoring.registerIfEnabled()` runs on every `AncsService` start (which `BootReceiver` triggers). HealthKit is also unwritable while the iPhone is locked, hence the on-disk staging in `HealthKitWriter`.
 

@@ -136,11 +136,6 @@ final class HealthKitWriter {
         return try handle.offset()
     }
 
-    private func stagedBytes() -> [UInt8] {
-        guard let data = try? Data(contentsOf: stagingURL) else { return [] }
-        return [UInt8](data)
-    }
-
     /// The first `maxRecords` staged records' bytes, without reading the whole file.
     private func stagedPrefix(maxRecords: Int) -> [UInt8] {
         guard let handle = try? FileHandle(forReadingFrom: stagingURL) else { return [] }
@@ -149,18 +144,29 @@ final class HealthKitWriter {
         return [UInt8](data)
     }
 
-    private func removeStaged(count: Int) {
-        let bytes = stagedBytes()
-        let removeBytes = min(count * HealthProtocol.recordSize, bytes.count)
-        let remaining = Data(bytes[removeBytes...])
+    /// Removes the first `count` staged records. False if the file couldn't be read or rewritten.
+    @discardableResult
+    private func removeStaged(count: Int) -> Bool {
+        let data: Data
+        do {
+            data = try Data(contentsOf: stagingURL)
+        } catch {
+            // Never treat an unreadable file as empty: that would wipe it.
+            logger.error("Failed to read health staging file: \(error.localizedDescription)")
+            return false
+        }
+        let removeBytes = min(count * HealthProtocol.recordSize, data.count)
+        let remaining = data.subdata(in: removeBytes..<data.count)
         do {
             if remaining.count < HealthProtocol.recordSize {
-                try? FileManager.default.removeItem(at: stagingURL)
+                try FileManager.default.removeItem(at: stagingURL)
             } else {
                 try remaining.write(to: stagingURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             }
+            return true
         } catch {
             logger.error("Failed to update health staging file: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -197,8 +203,10 @@ final class HealthKitWriter {
             logger.info("Skipping \(denied) samples of types not allowed in Health")
         }
         guard !samples.isEmpty else {
-            removeStaged(count: count) // nothing usable in this chunk
-            flushOnQueue()
+            // Nothing usable in this chunk; move on only if it was really removed.
+            if removeStaged(count: count) {
+                flushOnQueue()
+            }
             return
         }
 
@@ -241,7 +249,7 @@ final class HealthKitWriter {
         }
     }
 
-    /// Deletes this app's stage-less "asleep" samples within the given sleep sessions.
+    /// Deletes the watch's own stage-less sleep samples within the given sleep sessions.
     /// `completion` runs on `queue`; true means HealthKit was not writable.
     private func deleteBasicSleep(overlapping sessions: [ClosedRange<Date>], completion: @escaping (Bool) -> Void) {
         let group = DispatchGroup()
@@ -250,6 +258,8 @@ final class HealthKitWriter {
             let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
                 HKQuery.predicateForSamples(withStart: session.lowerBound, end: session.upperBound, options: []),
                 HKQuery.predicateForCategorySamples(with: .equalTo, value: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue),
+                // Only the watch's basic sleep: relay samples without a stage must stay.
+                HKQuery.predicateForObjects(withMetadataKey: Self.watchSleepMetadataKey),
             ])
             group.enter()
             healthStore.deleteObjects(of: HKCategoryType(.sleepAnalysis), predicate: predicate) { success, deleted, error in
@@ -345,6 +355,8 @@ final class HealthKitWriter {
 
     /// Samsung Health sleep score (0...100), stored on the "In Bed" sample. Health doesn't display it.
     static let sleepScoreMetadataKey = "WearBridgeSleepScore"
+    /// Marks the watch's own stage-less sleep, which relay sleep replaces.
+    static let watchSleepMetadataKey = "WearBridgeWatchSleep"
 
     static func sleepAnalysisValue(forStage stage: Double) -> HKCategoryValueSleepAnalysis? {
         switch stage {
@@ -353,6 +365,7 @@ final class HealthKitWriter {
         case Double(HealthProtocol.sleepStageLight): return .asleepCore
         case Double(HealthProtocol.sleepStageDeep): return .asleepDeep
         case Double(HealthProtocol.sleepStageREM): return .asleepREM
+        case Double(HealthProtocol.sleepStageWatch): return .asleepUnspecified
         default: return nil
         }
     }
@@ -393,12 +406,16 @@ final class HealthKitWriter {
             return quantity(.flightsClimbed, .count())
         case HealthProtocol.typeSleep:
             guard record.end > record.start, let stage = sleepAnalysisValue(forStage: record.value) else { return nil }
+            var sleepMetadata = metadata
+            if record.value == Double(HealthProtocol.sleepStageWatch) {
+                sleepMetadata[watchSleepMetadataKey] = true
+            }
             return HKCategorySample(
                 type: HKCategoryType(.sleepAnalysis),
                 value: stage.rawValue,
                 start: start,
                 end: end,
-                metadata: metadata
+                metadata: sleepMetadata
             )
         case HealthProtocol.typeInBed:
             guard record.end > record.start, record.value <= 100 else { return nil }

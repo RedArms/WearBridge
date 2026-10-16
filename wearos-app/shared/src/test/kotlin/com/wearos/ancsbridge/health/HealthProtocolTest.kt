@@ -61,7 +61,8 @@ class HealthProtocolTest {
     fun `type specific values are checked`() {
         fun r(type: Int, value: Double) = HealthRecord(type, 1_000, 1_060, value)
         assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, HealthProtocol.SLEEP_STAGE_REM.toDouble())))
-        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, 5.0)))
+        assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, HealthProtocol.SLEEP_STAGE_WATCH.toDouble())))
+        assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, 6.0)))
         assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_SLEEP, 1.5)))
         assertTrue(HealthProtocol.isValid(r(HealthProtocol.TYPE_IN_BED, 82.0)))
         assertFalse(HealthProtocol.isValid(r(HealthProtocol.TYPE_IN_BED, 101.0)))

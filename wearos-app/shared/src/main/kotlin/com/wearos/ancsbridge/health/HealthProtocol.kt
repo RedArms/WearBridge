@@ -57,11 +57,13 @@ object HealthProtocol {
     const val TYPE_OXYGEN_SATURATION = 7 // SpO2 in percent (0..100]
     const val TYPE_BLOOD_PRESSURE = 8    // value = systolic * 1000 + diastolic, mmHg (see bloodPressureValue)
 
-    const val SLEEP_STAGE_UNSPECIFIED = 0 // asleep, stage unknown (watch "asleep" state)
+    const val SLEEP_STAGE_UNSPECIFIED = 0 // asleep, stage unknown
     const val SLEEP_STAGE_AWAKE = 1
     const val SLEEP_STAGE_LIGHT = 2
     const val SLEEP_STAGE_DEEP = 3
     const val SLEEP_STAGE_REM = 4
+    /** Asleep, from the watch's own activity state. Replaced on the iPhone by relay sleep for the same night. */
+    const val SLEEP_STAGE_WATCH = 5
 
     val KNOWN_TYPES = setOf(
         TYPE_HEART_RATE, TYPE_STEPS, TYPE_DISTANCE, TYPE_FLOORS,
@@ -77,7 +79,7 @@ object HealthProtocol {
             value >= 0.0
         if (!common) return false
         return when (record.type) {
-            TYPE_SLEEP -> isWhole(value) && value <= SLEEP_STAGE_REM
+            TYPE_SLEEP -> isWhole(value) && value <= SLEEP_STAGE_WATCH
             TYPE_IN_BED -> isWhole(value) && value <= 100.0
             TYPE_OXYGEN_SATURATION -> value > 0.0 && value <= 100.0
             TYPE_BLOOD_PRESSURE -> isWhole(value) && splitBloodPressure(value).let { (sys, dia) ->

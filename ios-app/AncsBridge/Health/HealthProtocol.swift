@@ -29,11 +29,13 @@ enum HealthProtocol {
     static let typeOxygenSaturation: UInt8 = 7 // SpO2 in percent
     static let typeBloodPressure: UInt8 = 8    // value = systolic * 1000 + diastolic (mmHg)
 
-    static let sleepStageUnspecified = 0 // asleep, stage unknown (watch "asleep" state)
+    static let sleepStageUnspecified = 0 // asleep, stage unknown
     static let sleepStageAwake = 1
     static let sleepStageLight = 2
     static let sleepStageDeep = 3
     static let sleepStageREM = 4
+    /// Asleep, from the watch's own activity state; replaced by relay sleep for the same night.
+    static let sleepStageWatch = 5
 
     /// (systolic, diastolic) in mmHg from a `typeBloodPressure` value.
     static func splitBloodPressure(_ value: Double) -> (systolic: Int, diastolic: Int) {

@@ -53,8 +53,10 @@ class BleConnectionManager(private val context: Context) {
         BUSY,
         /** The companion app (with health support) is not reachable right now. */
         UNSUPPORTED,
-        /** The iPhone rejected the write, or it timed out. */
-        FAILED
+        /** The iPhone rejected the write (e.g. Apple Health sync is off), or the link dropped. */
+        FAILED,
+        /** No answer in time (e.g. the iPhone app is being relaunched); the write may still complete. */
+        TIMEOUT
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -486,7 +488,11 @@ class BleConnectionManager(private val context: Context) {
         }
         val acknowledged = withTimeoutOrNull(HEALTH_WRITE_TIMEOUT_MS) { ack.await() }
         pendingHealthWrite = null
-        return if (acknowledged == true) HealthWriteResult.SUCCESS else HealthWriteResult.FAILED
+        return when (acknowledged) {
+            true -> HealthWriteResult.SUCCESS
+            false -> HealthWriteResult.FAILED
+            null -> HealthWriteResult.TIMEOUT
+        }
     }
 
     fun disconnect() {
