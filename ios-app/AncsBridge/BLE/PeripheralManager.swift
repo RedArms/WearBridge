@@ -37,6 +37,7 @@ class PeripheralManager: NSObject, ObservableObject {
 
     /// Saves health data sent by the watch to Apple Health
     let healthWriter = HealthKitWriter(isEnabled: SettingsStore.isHealthSyncEnabled)
+    private var appActiveObserver: NSObjectProtocol?
 
     /// Standard BLE service UUIDs to probe for connected devices.
     /// Wear OS watches expose these standard GATT services.
@@ -77,6 +78,19 @@ class PeripheralManager: NSObject, ObservableObject {
         }
         // Start/stop based on setting
         updateCallStateObserving()
+
+        // Staged health records wait while a Health type is undetermined; ask when the app is opened.
+        appActiveObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshHealthAuthorization()
+        }
+    }
+
+    deinit {
+        if let appActiveObserver {
+            NotificationCenter.default.removeObserver(appActiveObserver)
+        }
     }
 
     /// Start or stop call state observing based on the current setting.

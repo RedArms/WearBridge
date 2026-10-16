@@ -72,9 +72,9 @@ Opt-in on both sides: **Health Sync** on the watch, **Settings → Apple Health*
 
 1. Watch: `HealthMonitoring` registers `HealthPassiveListenerService` with Health Services (heart rate, steps, distance, floors, "asleep" activity state). Registration is redone on every `AncsService` start because Health Services forgets it on reboot.
 2. Watch: records go to `HealthRecordStore`, a fixed-record file queue (`health_queue.bin`, capped at 50k records).
-3. Watch: `HealthSyncManager` flushes 10 s after connecting, 30 s after new data, and every 15 min. One write-with-response at a time, sized to the MTU (max 30 records), acked records removed.
+3. Watch: `HealthSyncManager` flushes 10 s after connecting, once a full write's worth of new data is queued, and every 15 min, but never while a call rings or within 3 s of ANCS activity (every GATT write can buzz the watch, gotcha 10). One write-with-response at a time, sized to the MTU (max 30 records); confirmed records leave the queue in chunks of up to 20 writes.
 4. iPhone: `PeripheralManager` decodes the batch, stages it on disk (`HealthKitWriter`, file protection *until first user authentication*), then responds `.success`. It responds `.requestNotSupported` when Apple Health sync is off, so the watch keeps its queue.
-5. iPhone: staged records are saved to HealthKit when it is writable (HealthKit is locked with the phone): right away, on unlock, on app foreground, or with the next batch.
+5. iPhone: staged records are saved to HealthKit when it is writable (HealthKit is locked with the phone): right away, on unlock, on app foreground, or with the next batch. Samples of types the user denied in Health are dropped; a type still undetermined holds the queue until the app is opened, which shows the permission sheet again.
 
 Wire format (little-endian), mirrored in `HealthProtocol.kt` / `HealthProtocol.swift`, with a shared golden test vector:
 

@@ -40,8 +40,9 @@ class BleConnectionManager(private val context: Context) {
         private const val TARGET_MTU = 512
         private const val DEFAULT_ATT_MTU = 23
         private const val MAX_SERVICE_DISCOVERY_RETRIES = 2
-        private const val HEALTH_WRITE_TIMEOUT_MS = 5_000L
-        private const val COMPANION_REDISCOVERY_INTERVAL_MS = 15 * 60_000L
+        private const val HEALTH_WRITE_TIMEOUT_MS = 3_000L
+        private const val MAX_DESCRIPTOR_WRITE_ATTEMPTS = 10
+        private const val DESCRIPTOR_RETRY_DELAY_MS = 200L
     }
 
     /** Outcome of [writeHealthData]. */
@@ -87,7 +88,7 @@ class BleConnectionManager(private val context: Context) {
 
     @Volatile
     private var pendingHealthWrite: CompletableDeferred<Boolean>? = null
-    private var lastCompanionRediscoveryMs = -COMPANION_REDISCOVERY_INTERVAL_MS
+    private var descriptorWriteAttempts = 0
 
     private var serviceDiscoveryRetries = 0
     private var notificationSourceChar: BluetoothGattCharacteristic? = null
@@ -438,39 +439,42 @@ class BleConnectionManager(private val context: Context) {
      * Write quick reply payload to the iPhone companion app via BLE.
      * Format: "callerName|replyMessage"
      */
-    fun writeQuickReply(payload: String) {
+    fun writeQuickReply(payload: String): Boolean {
         val gatt = this.gatt ?: run {
             Log.e(TAG, "writeQuickReply: no GATT connection")
-            return
+            return false
         }
         val service = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID) ?: run {
             Log.e(TAG, "writeQuickReply: companion service not found")
-            return
+            return false
         }
         val char = service.getCharacteristic(AncsConstants.QUICK_REPLY_CHARACTERISTIC_UUID) ?: run {
             Log.e(TAG, "writeQuickReply: quick reply characteristic not found")
-            return
+            return false
         }
         val data = payload.toByteArray(Charsets.UTF_8)
         char.value = data
         char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val success = gatt.writeCharacteristic(char)
         Log.i(TAG, "writeQuickReply: wrote ${data.size} bytes, success=$success")
+        return success
     }
 
     /**
      * Send one health batch (see HealthProtocol) to the companion app and wait for
      * the iPhone's write response. The caller (HealthSyncManager) sends one batch
      * at a time.
+     *
+     * If the companion service wasn't there when we connected (iPhone app not
+     * running), this returns UNSUPPORTED until the next connection. Services are
+     * deliberately not re-discovered mid-session: that would disturb the live
+     * ANCS subscription.
      */
     suspend fun writeHealthData(payload: ByteArray): HealthWriteResult {
         val gatt = this.gatt ?: return HealthWriteResult.FAILED
         val char = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID)
             ?.getCharacteristic(AncsConstants.HEALTH_DATA_CHARACTERISTIC_UUID)
-        if (char == null) {
-            requestCompanionRediscovery(gatt)
-            return HealthWriteResult.UNSUPPORTED
-        }
+            ?: return HealthWriteResult.UNSUPPORTED
 
         val ack = CompletableDeferred<Boolean>()
         pendingHealthWrite = ack
@@ -483,18 +487,6 @@ class BleConnectionManager(private val context: Context) {
         val acknowledged = withTimeoutOrNull(HEALTH_WRITE_TIMEOUT_MS) { ack.await() }
         pendingHealthWrite = null
         return if (acknowledged == true) HealthWriteResult.SUCCESS else HealthWriteResult.FAILED
-    }
-
-    /**
-     * The companion service is only in the iPhone's GATT table while the app runs.
-     * If it was missing when we connected, refresh the service list now and then.
-     */
-    private fun requestCompanionRediscovery(gatt: BluetoothGatt) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastCompanionRediscoveryMs < COMPANION_REDISCOVERY_INTERVAL_MS) return
-        lastCompanionRediscoveryMs = now
-        Log.i(TAG, "Health characteristic not found, re-discovering services")
-        gatt.discoverServices()
     }
 
     fun disconnect() {
@@ -548,10 +540,27 @@ class BleConnectionManager(private val context: Context) {
     }
 
     private fun processDescriptorWriteQueue() {
-        if (descriptorWriteQueue.isEmpty()) return
-        val (_, descriptor) = descriptorWriteQueue.poll() ?: return
+        val gatt = this.gatt ?: return
+        val (characteristic, descriptor) = descriptorWriteQueue.peek() ?: return
         isWritingDescriptor = true
-        gatt?.writeDescriptor(descriptor)
+        if (gatt.writeDescriptor(descriptor)) {
+            descriptorWriteQueue.poll()
+            descriptorWriteAttempts = 0
+            return
+        }
+        // Another GATT operation (e.g. a health sync write) is in flight: retry
+        // shortly rather than leaving the queue stuck with isWritingDescriptor set.
+        isWritingDescriptor = false
+        descriptorWriteAttempts++
+        if (descriptorWriteAttempts >= MAX_DESCRIPTOR_WRITE_ATTEMPTS) {
+            Log.e(TAG, "Giving up on CCCD write for ${characteristic.uuid}")
+            descriptorWriteQueue.poll()
+            descriptorWriteAttempts = 0
+        }
+        scope.launch {
+            delay(DESCRIPTOR_RETRY_DELAY_MS)
+            if (!isWritingDescriptor) processDescriptorWriteQueue()
+        }
     }
 
     private fun scheduleReconnect() {
@@ -570,6 +579,7 @@ class BleConnectionManager(private val context: Context) {
         dataSourceChar = null
         descriptorWriteQueue.clear()
         isWritingDescriptor = false
+        descriptorWriteAttempts = 0
     }
 
     fun destroy() {

@@ -57,10 +57,14 @@ class HealthRecordStore(
     }
 
     /** Remove a batch that the iPhone confirmed. */
+    fun ack(batch: Batch) = ack(batch, batch.records.size)
+
+    /** Remove the first [count] records of [batch], which the iPhone confirmed. */
     @Synchronized
-    fun ack(batch: Batch) {
+    fun ack(batch: Batch, count: Int) {
+        val confirmed = count.coerceIn(0, batch.records.size)
         val alreadyTrimmed = (removedFromHead - batch.headIndex).coerceAtLeast(0L)
-        val remaining = batch.records.size - alreadyTrimmed
+        val remaining = confirmed - alreadyTrimmed
         if (remaining > 0) removeFirst(remaining.toInt())
     }
 

@@ -65,10 +65,13 @@ class AncsService : Service() {
         const val NOTIFICATION_ID_CALL = 999
         private const val MAX_ACTIVE_NOTIFICATIONS = 20 // Android limit is 25; keep headroom
 
-        // Control Point writes fail while another GATT operation (e.g. a health
-        // sync write) is in flight, so retry briefly instead of dropping the request.
-        private const val CONTROL_POINT_WRITE_ATTEMPTS = 4
-        private const val CONTROL_POINT_RETRY_DELAY_MS = 150L
+        // GATT writes fail while another operation (e.g. a health sync write,
+        // at most ~3 s) is in flight, so retry instead of dropping the request.
+        private const val GATT_WRITE_ATTEMPTS = 20
+        private const val GATT_RETRY_DELAY_MS = 150L
+
+        // Health sync stays off the link while a call rings and right after ANCS activity.
+        private const val HEALTH_SYNC_QUIET_MS = 3_000L
 
         /** Shared connection state observable by the ViewModel */
         private val _sharedConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
@@ -93,7 +96,8 @@ class AncsService : Service() {
     // Reconnection grace period — suppress vibration for notifications arriving
     // in the first 60 seconds after subscribing (they're backlog, not truly new)
     private var subscriptionTime = 0L
-    private var activeCallUid: Long = -1
+    @Volatile private var activeCallUid: Long = -1
+    @Volatile private var lastAncsActivityMs = 0L
     private val reconnectionGracePeriodMs = 60_000L
 
     // Serial queue for Control Point requests
@@ -170,7 +174,9 @@ class AncsService : Service() {
         // Health Data Bridge: send passive health data to the iPhone (opt-in from
         // the watch UI). Health Services forgets registrations on reboot, so
         // re-register whenever the service starts.
-        healthSync = HealthSyncManager(this, connectionManager, scope)
+        healthSync = HealthSyncManager(this, connectionManager, scope) {
+            activeCallUid == -1L && System.currentTimeMillis() - lastAncsActivityMs > HEALTH_SYNC_QUIET_MS
+        }
         healthSync.start()
         scope.launch { HealthMonitoring.registerIfEnabled(this@AncsService) }
     }
@@ -209,7 +215,11 @@ class AncsService : Service() {
                 val callerName = intent.getStringExtra("caller_name") ?: "Unknown"
                 val payload = "$callerName|$replyText"
                 Log.i(TAG, "Sending quick reply via BLE: $payload")
-                connectionManager.writeQuickReply(payload)
+                scope.launch {
+                    if (!retryGattWrite { connectionManager.writeQuickReply(payload) }) {
+                        Log.e(TAG, "Failed to send quick reply")
+                    }
+                }
             }
             ACTION_CLEAR_ALL -> {
                 Log.i(TAG, "Clearing all notifications (${activeNotificationIds.size} tracked)")
@@ -252,6 +262,7 @@ class AncsService : Service() {
     }
 
     private fun handleNotificationSourceEvent(data: ByteArray) {
+        lastAncsActivityMs = System.currentTimeMillis()
         val event = NotificationSourceParser.parse(data) ?: run {
             Log.w(TAG, "Failed to parse NS event")
             return
@@ -678,10 +689,14 @@ class AncsService : Service() {
     }
 
 
-    private suspend fun writeControlPointWithRetry(data: ByteArray): Boolean {
-        repeat(CONTROL_POINT_WRITE_ATTEMPTS) { attempt ->
-            if (connectionManager.writeControlPoint(data)) return true
-            if (attempt < CONTROL_POINT_WRITE_ATTEMPTS - 1) delay(CONTROL_POINT_RETRY_DELAY_MS)
+    private suspend fun writeControlPointWithRetry(data: ByteArray): Boolean =
+        retryGattWrite { connectionManager.writeControlPoint(data) }
+
+    /** Retries a GATT write that returns false while another operation is in flight. */
+    private suspend fun retryGattWrite(write: () -> Boolean): Boolean {
+        repeat(GATT_WRITE_ATTEMPTS) { attempt ->
+            if (write()) return true
+            if (attempt < GATT_WRITE_ATTEMPTS - 1) delay(GATT_RETRY_DELAY_MS)
         }
         return false
     }

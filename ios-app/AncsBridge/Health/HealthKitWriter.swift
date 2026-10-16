@@ -27,6 +27,10 @@ final class HealthKitWriter {
     private let stagingURL: URL
     private let isEnabled: () -> Bool
     private var isFlushing = false
+    /// Bumped when staged records are discarded, so a save that was in flight
+    /// doesn't remove records staged after the discard.
+    private var stagingGeneration = 0
+    private var flushGeneration = 0
     private var observers: [NSObjectProtocol] = []
 
     init(isEnabled: @escaping () -> Bool) {
@@ -95,11 +99,23 @@ final class HealthKitWriter {
     /// Drops staged records, e.g. when the user turns the sync off.
     func discardStaged() {
         queue.async {
+            self.stagingGeneration += 1
             try? FileManager.default.removeItem(at: self.stagingURL)
         }
     }
 
     private func appendToStaging(_ data: Data) throws {
+        let length = try appendRecordBytes(data)
+        // Trimming while a save is in flight would shift the records it is about to remove.
+        let count = Int(length) / HealthProtocol.recordSize
+        if !isFlushing, count > Self.maxStagedRecords {
+            removeStaged(count: count - Self.maxStagedRecords)
+            logger.warning("Health staging full; dropped \(count - Self.maxStagedRecords) oldest records")
+        }
+    }
+
+    /// Appends to the staging file and returns its new length in bytes.
+    private func appendRecordBytes(_ data: Data) throws -> UInt64 {
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: stagingURL.path) {
             try fileManager.createDirectory(at: stagingURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -117,15 +133,19 @@ final class HealthKitWriter {
         }
         try handle.write(contentsOf: data)
         try handle.synchronize()
-
-        // Trimming while a save is in flight would shift the records it is about to remove.
-        if !isFlushing {
-            trimStagingIfNeeded()
-        }
+        return try handle.offset()
     }
 
     private func stagedBytes() -> [UInt8] {
         guard let data = try? Data(contentsOf: stagingURL) else { return [] }
+        return [UInt8](data)
+    }
+
+    /// The first `maxRecords` staged records' bytes, without reading the whole file.
+    private func stagedPrefix(maxRecords: Int) -> [UInt8] {
+        guard let handle = try? FileHandle(forReadingFrom: stagingURL) else { return [] }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maxRecords * HealthProtocol.recordSize) else { return [] }
         return [UInt8](data)
     }
 
@@ -144,14 +164,6 @@ final class HealthKitWriter {
         }
     }
 
-    private func trimStagingIfNeeded() {
-        let bytes = stagedBytes()
-        let count = bytes.count / HealthProtocol.recordSize
-        guard count > Self.maxStagedRecords else { return }
-        removeStaged(count: count - Self.maxStagedRecords)
-        logger.warning("Health staging full; dropped \(count - Self.maxStagedRecords) oldest records")
-    }
-
     // MARK: - Saving to HealthKit
 
     /// Saves staged records to HealthKit if it is reachable. Safe to call often.
@@ -161,12 +173,29 @@ final class HealthKitWriter {
 
     private func flushOnQueue() {
         guard !isFlushing, isEnabled(), Self.isHealthDataAvailable else { return }
-        let bytes = stagedBytes()
-        let count = min(bytes.count / HealthProtocol.recordSize, Self.maxRecordsPerSave)
+        let bytes = stagedPrefix(maxRecords: Self.maxRecordsPerSave)
+        let count = bytes.count / HealthProtocol.recordSize
         guard count > 0 else { return }
 
         let records = HealthProtocol.decodeRecords(bytes, count: count)
-        let samples = records.compactMap(Self.makeSample)
+        var samples: [HKSample] = []
+        var denied = 0
+        for sample in records.compactMap(Self.makeSample) {
+            switch access(for: sample) {
+            case .allowed:
+                samples.append(sample)
+            case .denied:
+                denied += 1
+            case .undetermined:
+                // The permission sheet shows the next time the app is opened.
+                logger.info("Health access for \(sample.sampleType.identifier) not decided yet; keeping \(count) staged records")
+                return
+            }
+        }
+        if denied > 0 {
+            // Types the user turned off in Health are dropped so they don't block the rest.
+            logger.info("Skipping \(denied) samples of types not allowed in Health")
+        }
         guard !samples.isEmpty else {
             removeStaged(count: count) // nothing usable in this chunk
             flushOnQueue()
@@ -174,7 +203,9 @@ final class HealthKitWriter {
         }
 
         isFlushing = true
-        let sessions = Self.sleepSessionRanges(records)
+        flushGeneration = stagingGeneration
+        let canWriteSleep = healthStore.authorizationStatus(for: HKCategoryType(.sleepAnalysis)) == .sharingAuthorized
+        let sessions = canWriteSleep ? Self.sleepSessionRanges(records) : []
         guard !sessions.isEmpty else {
             save(samples, stagedCount: count)
             return
@@ -271,20 +302,43 @@ final class HealthKitWriter {
     }
 
     private func finishSave(removing count: Int, saved: Int) {
-        removeStaged(count: count)
+        if flushGeneration == stagingGeneration {
+            removeStaged(count: count)
+        } // else the staging file was discarded while saving; it holds only newer records now
         isFlushing = false
         logger.info("Saved \(saved) health samples to HealthKit")
         flushOnQueue() // continue with the next chunk, if any
     }
 
+    /// Only a locked phone is worth waiting for. Anything else (including a type the
+    /// user denied after the access check) is dropped, so one sample can't block the queue.
     private static func isRetryable(_ error: Error?) -> Bool {
-        guard let error = error as? HKError else { return false }
-        switch error.code {
-        case .errorDatabaseInaccessible, .errorAuthorizationDenied, .errorAuthorizationNotDetermined:
-            return true
-        default:
-            return false
+        (error as? HKError)?.code == .errorDatabaseInaccessible
+    }
+
+    private enum SampleAccess { case allowed, denied, undetermined }
+
+    /// Whether the user lets WearBridge write this sample. A blood pressure
+    /// correlation is checked through its systolic and diastolic samples.
+    private func access(for sample: HKSample) -> SampleAccess {
+        let types: [HKObjectType]
+        if let correlation = sample as? HKCorrelation {
+            types = correlation.objects.map { $0.sampleType }
+        } else {
+            types = [sample.sampleType]
         }
+        var result = SampleAccess.allowed
+        for type in types {
+            switch healthStore.authorizationStatus(for: type) {
+            case .sharingAuthorized:
+                continue
+            case .sharingDenied:
+                return .denied
+            default:
+                result = .undetermined
+            }
+        }
+        return result
     }
 
     // MARK: - Mapping

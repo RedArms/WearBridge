@@ -49,6 +49,27 @@ class HealthRecordStoreTest {
     }
 
     @Test
+    fun `partial ack keeps the unconfirmed tail of a batch`() {
+        val store = HealthRecordStore(file)
+        store.append((0 until 5).map(::record))
+        val batch = store.peek(4)
+        store.ack(batch, 3)
+        assertEquals(listOf(record(3), record(4)), store.peek(10).records)
+        store.ack(store.peek(10), 0)
+        assertEquals(2, store.size())
+    }
+
+    @Test
+    fun `partial ack after the cap trimmed the head removes only what is left`() {
+        val store = HealthRecordStore(file, maxRecords = 4)
+        store.append((0 until 4).map(::record))
+        val batch = store.peek(3) // records 0, 1, 2
+        store.append(listOf(record(4), record(5))) // cap trims records 0 and 1
+        store.ack(batch, 2) // records 0 and 1 confirmed, already gone
+        assertEquals(listOf(record(2), record(3), record(4), record(5)), store.peek(10).records)
+    }
+
+    @Test
     fun `queue survives a new instance`() {
         HealthRecordStore(file).append(listOf(record(0), record(1)))
         assertEquals(listOf(record(0), record(1)), HealthRecordStore(file).peek(10).records)
