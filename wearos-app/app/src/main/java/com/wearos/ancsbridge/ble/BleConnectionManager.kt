@@ -73,6 +73,9 @@ class BleConnectionManager(private val context: Context) {
     private val _callStateEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 16)
     val callStateEvents: SharedFlow<ByteArray> = _callStateEvents.asSharedFlow()
 
+    private val _wakeAlarmEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
+    val wakeAlarmEvents: SharedFlow<ByteArray> = _wakeAlarmEvents.asSharedFlow()
+
     private var gatt: BluetoothGatt? = null
     private var targetDevice: BluetoothDevice? = null
     private var reconnectJob: Job? = null
@@ -178,10 +181,21 @@ class BleConnectionManager(private val context: Context) {
             Log.i(TAG, "ANCS service found!")
             serviceDiscoveryRetries = 0
 
-            // If already subscribed (rediscovery for companion service), just read companion
+            // If already subscribed (rediscovery for companion service), refresh the
+            // companion side only: ANCS stays subscribed (gotcha 12).
             if (notificationSourceChar != null && dataSourceChar != null) {
                 Log.i(TAG, "ANCS already subscribed, checking companion service")
+                // Fresh characteristic objects, in case handles moved.
+                ancsService.getCharacteristic(AncsConstants.NOTIFICATION_SOURCE_UUID)?.let { notificationSourceChar = it }
+                ancsService.getCharacteristic(AncsConstants.CONTROL_POINT_UUID)?.let { controlPointChar = it }
+                ancsService.getCharacteristic(AncsConstants.DATA_SOURCE_UUID)?.let { dataSourceChar = it }
                 readCompanionStatus()
+                // The companion app may have republished its service: subscribe again.
+                scope.launch {
+                    delay(500)
+                    subscribeToCallState()
+                    subscribeToWakeAlarm()
+                }
                 return@GattCallback
             }
 
@@ -227,10 +241,11 @@ class BleConnectionManager(private val context: Context) {
                     readGapDeviceName()
                     // Read companion status to notify iPhone app
                     readCompanionStatus()
-                    // Subscribe to call state from companion app (if available)
+                    // Subscribe to call state and wake alarm from companion app (if available)
                     scope.launch {
                         delay(500) // Small delay to avoid GATT queue congestion
                         subscribeToCallState()
+                        subscribeToWakeAlarm()
                     }
                 }
             }
@@ -259,6 +274,13 @@ class BleConnectionManager(private val context: Context) {
         },
         onCallStateChanged = { data ->
             _callStateEvents.tryEmit(data)
+        },
+        onWakeAlarmChanged = { data ->
+            _wakeAlarmEvents.tryEmit(data)
+        },
+        onServicesChangedCallback = { changedGatt ->
+            Log.i(TAG, "iPhone services changed, re-discovering")
+            changedGatt.discoverServices()
         }
     )
 
@@ -438,6 +460,21 @@ class BleConnectionManager(private val context: Context) {
     }
 
     /**
+     * Subscribe to the wake alarm characteristic: the companion app says when the
+     * iPhone's wake-up alarm rings and stops (driven by a Shortcuts automation).
+     */
+    fun subscribeToWakeAlarm() {
+        val gatt = this.gatt ?: return
+        val char = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID)
+            ?.getCharacteristic(AncsConstants.WAKE_ALARM_CHARACTERISTIC_UUID) ?: run {
+            Log.d(TAG, "subscribeToWakeAlarm: wake alarm characteristic not found")
+            return
+        }
+        subscribeToCharacteristic(char)
+        Log.i(TAG, "Subscribing to wake alarm characteristic")
+    }
+
+    /**
      * Write quick reply payload to the iPhone companion app via BLE.
      * Format: "callerName|replyMessage"
      */
@@ -468,9 +505,9 @@ class BleConnectionManager(private val context: Context) {
      * at a time.
      *
      * If the companion service wasn't there when we connected (iPhone app not
-     * running), this returns UNSUPPORTED until the next connection. Services are
-     * deliberately not re-discovered mid-session: that would disturb the live
-     * ANCS subscription.
+     * running), this returns UNSUPPORTED until the iPhone publishes it: its
+     * Service Changed indication makes the watch re-discover services
+     * (onServiceChanged), without touching the live ANCS subscription.
      */
     suspend fun writeHealthData(payload: ByteArray): HealthWriteResult {
         val gatt = this.gatt ?: return HealthWriteResult.FAILED

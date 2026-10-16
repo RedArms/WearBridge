@@ -20,4 +20,8 @@
     <string name="notification_action_negative">Dismiss</string>
     <!-- How the watch wearer is named in mirrored conversations -->
     <string name="notification_self">You</string>
+    <string name="wake_alarm_title">Wake up</string>
+    <string name="wake_alarm_text">Your iPhone alarm is ringing</string>
+    <string name="wake_alarm_stop">Stop</string>
+    <string name="wake_alarm_snooze">Snooze</string>
 </resources>

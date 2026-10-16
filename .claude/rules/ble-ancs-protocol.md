@@ -65,6 +65,7 @@ When a call is answered on the iPhone, the watch overlay transitions from "Incom
 | Quick Reply | `A0E3D5B3-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Write — watch sends `"callerName\|replyText"` |
 | Call State | `A0E3D5B4-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Read/Notify — iPhone pushes call state (0x00=idle, 0x01=ringing, 0x02=active, 0x03=ended) |
 | Health Data | `A0E3D5B5-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Write (encryption required) — watch sends health record batches |
+| Wake Alarm | `A0E3D5B6-4C6F-4E8A-9B2D-7F1E3A5C8D0B` | Read/Notify — iPhone pushes its wake-up alarm state (0x00=stopped, 0x01=ringing) |
 
 ## Health Data Bridge
 
@@ -103,6 +104,14 @@ Health Services only exposes an "asleep" state. Samsung Health on the paired And
 4. iPhone: before saving a chunk with in-bed sessions, `HealthKitWriter` deletes the watch's own sleep samples (tagged `WearBridgeWatchSleep`) inside those sessions, so staged sleep replaces basic sleep. Relay samples without a stage are kept.
 
 The relay module is only included in the Gradle build when the SDK AAR is in `wearos-app/relay/libs/` (not redistributable, gitignored). The `:shared` module holds `HealthProtocol` for both apps.
+
+## Wake-up Alarm
+
+1. iPhone: the Sleep Schedule wake-up alarm rings (its sounds ramp up on their own). A Shortcuts automation (Automation → Alarm → goes off) runs `RingWatchAlarmIntent`, which may launch the app in the background; `PeripheralManager.shared.setWakeAlarm` waits for Bluetooth / the restored service, then notifies the wake alarm characteristic. Stopped / snoozed automations run `StopWatchAlarmIntent` (0x00).
+2. Watch: `BleConnectionManager` subscribes to the wake alarm characteristic after call state. `AncsService` starts / stops `WakeAlarm`.
+3. Watch: if an iPhone Clock alarm arrives over ANCS (`com.apple.mobiletimer` with actions; some iPhones never send it, reported on iPhone 14+), it starts `WakeAlarm` too, and REMOVED stops it. Its action labels decide which ANCS action stops or snoozes the iPhone alarm from the watch (`ClockAlarm`).
+4. `WakeAlarm`: waveform from `WakeRamp` (60 s from 60 ms / amplitude 30 taps to 650 ms / 255 buzzes, then a repeating double buzz) with `VibrationAttributes.USAGE_ALARM`, so it goes through Bedtime mode and notification vibrations don't cut it; full-screen `WakeAlarmActivity` (channel `ancs_wake_alarm_v1`, silent); stops by itself after 10 min.
+5. iOS state restoration: restored characteristics are re-bound (call state notifications used to stop after a relaunch), and a restored service without the wake alarm characteristic is rebuilt.
 
 ## Quick Reply Flow
 

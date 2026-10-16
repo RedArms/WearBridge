@@ -62,6 +62,15 @@
             android:excludeFromRecents="true"
             android:launchMode="singleInstance" />
 
+        <activity
+            android:name=".ui.WakeAlarmActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask" />
+
         <service
             android:name=".ancs.AncsService"
             android:foregroundServiceType="connectedDevice"

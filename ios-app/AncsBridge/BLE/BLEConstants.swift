@@ -24,6 +24,13 @@ enum BLEConstants {
     static let callStateActive: UInt8 = 0x02
     static let callStateEnded: UInt8 = 0x03
 
+    /// Characteristic: wake alarm (readable, notifiable — tells the watch the iPhone's wake-up alarm rings)
+    static let wakeAlarmCharacteristicUUID = CBUUID(string: "A0E3D5B6-4C6F-4E8A-9B2D-7F1E3A5C8D0B")
+
+    /// Wake alarm values sent over BLE
+    static let wakeAlarmStopped: UInt8 = 0x00
+    static let wakeAlarmRinging: UInt8 = 0x01
+
     /// State restoration identifier
     static let restoreIdentifier = "com.wearos.ancsbridge.peripheral"
 

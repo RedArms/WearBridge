@@ -23,7 +23,10 @@ class GattCallback(
     private val onCharacteristicWritten: (BluetoothGattCharacteristic, Int) -> Unit,
     private val onMtuChanged: (Int, Int) -> Unit,
     private val onCharacteristicReadCallback: ((BluetoothGattCharacteristic, ByteArray) -> Unit)? = null,
-    private val onCallStateChanged: ((ByteArray) -> Unit)? = null
+    private val onCallStateChanged: ((ByteArray) -> Unit)? = null,
+    private val onWakeAlarmChanged: ((ByteArray) -> Unit)? = null,
+    // Not named onServiceChanged: same-name lambdas recurse (gotcha 1).
+    private val onServicesChangedCallback: ((BluetoothGatt) -> Unit)? = null
 ) : BluetoothGattCallback() {
 
     companion object {
@@ -85,6 +88,10 @@ class GattCallback(
                 Log.d(TAG, "Call State: ${data.toHexString()}")
                 onCallStateChanged?.invoke(data)
             }
+            AncsConstants.WAKE_ALARM_CHARACTERISTIC_UUID.toString().uppercase() -> {
+                Log.d(TAG, "Wake Alarm: ${data.toHexString()}")
+                onWakeAlarmChanged?.invoke(data)
+            }
             else -> {
                 Log.d(TAG, "Unknown characteristic changed: $uuid")
             }
@@ -121,6 +128,12 @@ class GattCallback(
             Log.d(TAG, "Characteristic read: ${characteristic.uuid} (${value.size} bytes)")
             onCharacteristicReadCallback?.invoke(characteristic, value)
         }
+    }
+
+    /** The iPhone changed its GATT database, e.g. the companion app republished its service. */
+    override fun onServiceChanged(gatt: BluetoothGatt) {
+        Log.i(TAG, "Remote services changed")
+        onServicesChangedCallback?.invoke(gatt)
     }
 
     override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {

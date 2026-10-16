@@ -94,6 +94,21 @@ class AncsApplication : Application() {
         )
 
         channels.forEach { manager.createNotificationChannel(it) }
+
+        // Wake-up alarm: WakeAlarm vibrates itself (alarm usage), so the channel is silent.
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_WAKE_ALARM,
+                "Wake-up alarm",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Gentle wake-up alarm, in sync with the iPhone alarm"
+                setBypassDnd(true)
+                enableVibration(false)
+                setSound(null, null)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+        )
     }
 
     companion object {
@@ -107,6 +122,7 @@ class AncsApplication : Application() {
         const val CHANNEL_SOCIAL = "ancs_social_$CHANNEL_VERSION"
         const val CHANNEL_SCHEDULE = "ancs_schedule_$CHANNEL_VERSION"
         const val CHANNEL_OTHER = "ancs_other_$CHANNEL_VERSION"
+        const val CHANNEL_WAKE_ALARM = "ancs_wake_alarm_v1"
 
         fun channelForCategory(categoryId: Int): String = when (categoryId) {
             AncsConstants.CATEGORY_INCOMING_CALL -> CHANNEL_INCOMING_CALL
