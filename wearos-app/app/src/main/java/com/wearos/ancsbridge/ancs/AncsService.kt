@@ -5,7 +5,11 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.os.IBinder
 import android.os.Vibrator
@@ -105,6 +109,8 @@ class AncsService : Service() {
 
         // Register bond state receiver
         registerReceiver(connectionManager.bondStateReceiver, BondStateReceiver.intentFilter)
+        // Reconnect as soon as Bluetooth comes back on (airplane mode, toggle)
+        registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
 
         // Register PhoneAccount for Telecom framework integration
         // This lets us show incoming calls via the system call UI
@@ -150,6 +156,13 @@ class AncsService : Service() {
                     }
                     is ConnectionState.Disconnected -> "Disconnected"
                     is ConnectionState.Error -> "Error: ${state.message}"
+                }
+                // The link dropped while a call was ringing: its REMOVED will never come.
+                if (state !is ConnectionState.Connected && state !is ConnectionState.Connecting &&
+                    activeCallUid != -1L
+                ) {
+                    Log.i(TAG, "Link lost during a call; dismissing the call screen")
+                    endActiveCall()
                 }
                 notificationManager.notify(SERVICE_NOTIFICATION_ID, buildServiceNotification(text))
             }
@@ -219,9 +232,35 @@ class AncsService : Service() {
         try {
             unregisterReceiver(connectionManager.bondStateReceiver)
         } catch (_: IllegalArgumentException) { }
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (_: IllegalArgumentException) { }
         connectionManager.destroy()
         attributeRequestQueue.close()
         scope.cancel()
+    }
+
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_ON -> {
+                    Log.i(TAG, "Bluetooth on: reconnecting")
+                    connectionManager.onBluetoothOn()
+                }
+                BluetoothAdapter.STATE_OFF -> connectionManager.onBluetoothOff()
+            }
+        }
+    }
+
+    /** Dismisses the call screen, Telecom call and call notification. */
+    private fun endActiveCall() {
+        activeCallUid = -1
+        vibrator.cancel()
+        notificationManager.cancel(NOTIFICATION_ID_CALL)
+        AncsConnectionService.endActiveCall()
+        sendBroadcast(Intent(IncomingCallActivity.ACTION_CALL_ENDED).apply {
+            setPackage(packageName)
+        })
     }
 
     private fun tryReconnectBonded() {
@@ -314,16 +353,11 @@ class AncsService : Service() {
                 notificationManager.cancel(removedId)
                 activeNotificationIds.remove(removedId)
 
-                // If this was an incoming call, dismiss everything
-                if (event.isIncomingCall || activeCallUid == event.notificationUid) {
+                // If this was the call on screen, dismiss everything (not for another
+                // call ending while a second one rings: call waiting).
+                if (activeCallUid == event.notificationUid) {
                     Log.i(TAG, "Call ended (REMOVE) uid=${event.notificationUid}")
-                    activeCallUid = -1
-                    vibrator.cancel()
-                    notificationManager.cancel(NOTIFICATION_ID_CALL)
-                    AncsConnectionService.endActiveCall()
-                    sendBroadcast(Intent(IncomingCallActivity.ACTION_CALL_ENDED).apply {
-                        setPackage(packageName)
-                    })
+                    endActiveCall()
                 }
             }
         }
@@ -437,20 +471,14 @@ class AncsService : Service() {
             "net.whatsapp.WhatsApp", "net.whatsapp.WhatsAppSMB",
             "com.apple.mobilephone", "com.apple.facetime"
         )
-        val messageAndTitle = "${notification.message} ${notification.title}"
-        val hasCallIndicator = messageAndTitle.contains("Incoming Call", ignoreCase = true) ||
-            messageAndTitle.contains("Incoming Voice", ignoreCase = true) ||
-            messageAndTitle.contains("Incoming Video", ignoreCase = true) ||
-            messageAndTitle.contains("Incoming Audio", ignoreCase = true) ||
-            messageAndTitle.contains("☎") ||
-            messageAndTitle.contains("Audio Call", ignoreCase = true) ||
-            messageAndTitle.contains("Video Call", ignoreCase = true) ||
-            messageAndTitle.contains("Voice Call", ignoreCase = true) ||
-            messageAndTitle.contains("is calling", ignoreCase = true) ||
-            messageAndTitle.contains("Ringing", ignoreCase = true)
-        val isIncomingCall = notification.categoryId == AncsConstants.CATEGORY_INCOMING_CALL ||
-            (notification.positiveActionLabel != null && hasCallIndicator) ||
-            (notification.appIdentifier in callApps && hasCallIndicator)
+        val isIncomingCall = CallDetection.isIncomingCall(
+            categoryId = notification.categoryId,
+            appIdentifier = notification.appIdentifier,
+            title = notification.title,
+            message = notification.message,
+            hasPositiveAction = notification.positiveActionLabel != null,
+            callApps = callApps
+        )
 
         if (isIncomingCall) {
             Log.i(TAG, "Showing incoming call screen for ${notification.title}")
@@ -561,6 +589,8 @@ class AncsService : Service() {
         evictOldestIfNeeded()
 
         notificationManager.notify(notifId, builder.build())
+        // An update (MODIFIED) re-posts the same ID: keep one entry per notification.
+        activeNotificationIds.remove(notifId)
         activeNotificationIds.addLast(notifId)
     }
 
