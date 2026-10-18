@@ -113,7 +113,7 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             val mailbox = RelayMailbox(applicationContext)
             mailbox.enqueue(fresh, now.epochSecond)
 
-            // Watch path, when it's around (it also tells the watch to leave sleep / heart rate to us).
+            // Watch path, when it's around (it also tells the watch to leave heart rate to us).
             val watch = try {
                 RelaySender.send(applicationContext, fresh)
                 "watch: sent"

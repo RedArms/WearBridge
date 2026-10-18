@@ -149,7 +149,10 @@ class HealthSyncManager(
     }
 
     private suspend fun flushLocked(reason: String) {
-        if (!HealthMonitoring.isEnabled(context) || !isSettled()) return
+        // Not gated on Health Sync being on: queued records were accepted (relay batches
+        // keep coming in, and losing a permission turns Health Sync off by itself);
+        // turning Health Sync off from the watch clears the queue.
+        if (!isSettled()) return
         if (SystemClock.elapsedRealtime() < backoffUntilMs) return
         val store = HealthMonitoring.store(context)
         var sent = 0

@@ -28,6 +28,11 @@ final class HealthKitWriter {
     private let healthStore = HKHealthStore()
     private let queue = DispatchQueue(label: "com.wearos.ancsbridge.health")
     private let stagingURL: URL
+    /// Relay sleep sessions seen recently, so watch sleep for the same nights is skipped.
+    private let relaySessionsURL: URL
+    /// Sessions whose older watch sleep still has to be deleted (deleting needs an unlocked phone).
+    private let pendingDeletesURL: URL
+    private var isDeleting = false
     private let isEnabled: () -> Bool
     private var isFlushing = false
     /// Bumped when staged records are discarded, so a save that was in flight
@@ -40,6 +45,8 @@ final class HealthKitWriter {
         self.isEnabled = isEnabled
         let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         stagingURL = supportDirectory.appendingPathComponent("health-staging.bin")
+        relaySessionsURL = supportDirectory.appendingPathComponent("health-relay-sessions.json")
+        pendingDeletesURL = supportDirectory.appendingPathComponent("health-pending-deletes.json")
 
         let center = NotificationCenter.default
         for name in [UIApplication.protectedDataDidBecomeAvailableNotification, UIApplication.didBecomeActiveNotification] {
@@ -182,6 +189,7 @@ final class HealthKitWriter {
 
     private func flushOnQueue() {
         guard !isFlushing, isEnabled(), Self.isHealthDataAvailable else { return }
+        processPendingDeletes() // e.g. on unlock, even with nothing staged
         let bytes = stagedPrefix(maxRecords: Self.maxRecordsPerSave)
         let count = bytes.count / HealthProtocol.recordSize
         guard count > 0 else { return }
@@ -215,49 +223,56 @@ final class HealthKitWriter {
 
         isFlushing = true
         flushGeneration = stagingGeneration
+        // Samsung Health sleep (from the phone relay) replaces the watch's basic
+        // "asleep" samples for the same nights: watch sleep inside a known relay
+        // session isn't saved, and watch sleep saved earlier is deleted afterwards.
         let canWriteSleep = healthStore.authorizationStatus(for: HKCategoryType(.sleepAnalysis)) == .sharingAuthorized
-        let sessions = canWriteSleep ? Self.sleepSessionRanges(records) : []
-        guard !sessions.isEmpty else {
-            save(samples, stagedCount: count)
+        let chunkSessions = canWriteSleep ? Self.sleepSessionRanges(records) : []
+        if !chunkSessions.isEmpty {
+            rememberRelaySessions(chunkSessions)
+        }
+        let relaySessions = knownRelaySessions()
+        let toSave = samples.filter { !Self.isWatchSleep($0, within: relaySessions) }
+        if toSave.count < samples.count {
+            logger.info("Skipping \(samples.count - toSave.count) watch sleep samples covered by relay sleep")
+        }
+        guard !toSave.isEmpty else {
+            finishSave(removing: count, saved: 0, replacing: chunkSessions)
             return
         }
-        // Samsung Health sleep (from the phone relay) replaces the watch's basic
-        // "asleep" samples for the same nights.
-        deleteBasicSleep(overlapping: sessions) { [weak self] mustRetry in
-            guard let self else { return }
-            if mustRetry {
-                self.isFlushing = false
-                self.logger.info("HealthKit not writable now; keeping \(count) staged records")
-            } else {
-                self.save(samples, stagedCount: count)
-            }
-        }
+        save(toSave, stagedCount: count, replacing: chunkSessions)
     }
 
     /// Saves one chunk of staged samples. Runs on `queue` with `isFlushing` set.
-    private func save(_ samples: [HKSample], stagedCount count: Int) {
+    /// `sessions`: relay sleep sessions in this chunk, whose older watch sleep is deleted once saved.
+    private func save(_ samples: [HKSample], stagedCount count: Int, replacing sessions: [ClosedRange<Date>]) {
         healthStore.save(samples) { [weak self] success, error in
             guard let self else { return }
             self.queue.async {
                 if success {
-                    self.finishSave(removing: count, saved: samples.count)
+                    self.finishSave(removing: count, saved: samples.count, replacing: sessions)
                 } else if Self.isRetryable(error) {
                     self.isFlushing = false
                     self.logger.info("HealthKit not writable now (\(error?.localizedDescription ?? "unknown")); keeping \(count) staged records")
                 } else {
                     // One bad sample fails the whole batch; save one by one and drop the rejects.
-                    self.saveIndividually(samples, stagedCount: count)
+                    self.saveIndividually(samples, stagedCount: count, replacing: sessions)
                 }
             }
         }
     }
 
-    /// Deletes the watch's own stage-less sleep samples within the given sleep sessions.
-    /// `completion` runs on `queue`; true means HealthKit was not writable.
-    private func deleteBasicSleep(overlapping sessions: [ClosedRange<Date>], completion: @escaping (Bool) -> Void) {
+    /// Deletes the watch's own sleep inside relay sessions that were saved. Deleting needs
+    /// the phone unlocked, unlike saving, so failed ranges stay on disk and are retried
+    /// with every flush instead of holding back the saves. Runs on `queue`.
+    private func processPendingDeletes() {
+        guard !isDeleting else { return }
+        let pending = loadRanges(pendingDeletesURL)
+        guard !pending.isEmpty else { return }
+        isDeleting = true
         let group = DispatchGroup()
-        var mustRetry = false
-        for session in sessions {
+        var done: [ClosedRange<Date>] = []
+        for session in pending {
             let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
                 HKQuery.predicateForSamples(withStart: session.lowerBound, end: session.upperBound, options: []),
                 HKQuery.predicateForCategorySamples(with: .equalTo, value: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue),
@@ -267,16 +282,57 @@ final class HealthKitWriter {
             group.enter()
             healthStore.deleteObjects(of: HKCategoryType(.sleepAnalysis), predicate: predicate) { success, deleted, error in
                 self.queue.async {
-                    if success, deleted > 0 {
-                        self.logger.info("Replaced \(deleted) basic sleep samples with staged sleep")
-                    } else if !success, Self.isRetryable(error) {
-                        mustRetry = true
+                    if success {
+                        if deleted > 0 { self.logger.info("Replaced \(deleted) watch sleep samples with relay sleep") }
+                        done.append(session)
+                    } else if !Self.isRetryable(error) {
+                        self.logger.error("Couldn't delete watch sleep: \(error?.localizedDescription ?? "unknown")")
+                        done.append(session) // won't get better by retrying
                     }
                     group.leave()
                 }
             }
         }
-        group.notify(queue: queue) { completion(mustRetry) }
+        group.notify(queue: queue) {
+            // Ranges added while deleting stay pending.
+            self.saveRanges(self.loadRanges(self.pendingDeletesURL).filter { !done.contains($0) }, to: self.pendingDeletesURL)
+            self.isDeleting = false
+        }
+    }
+
+    private func rememberRelaySessions(_ sessions: [ClosedRange<Date>]) {
+        let cutoff = Date(timeIntervalSinceNow: -45 * 24 * 3600)
+        let known = loadRanges(relaySessionsURL).filter { $0.upperBound > cutoff }
+        saveRanges(known + sessions.filter { !known.contains($0) }, to: relaySessionsURL)
+    }
+
+    private func knownRelaySessions() -> [ClosedRange<Date>] {
+        loadRanges(relaySessionsURL)
+    }
+
+    /// True for a watch "asleep" sample overlapping one of `sessions`.
+    static func isWatchSleep(_ sample: HKSample, within sessions: [ClosedRange<Date>]) -> Bool {
+        guard sample.metadata?[watchSleepMetadataKey] as? Bool == true else { return false }
+        return sessions.contains { sample.startDate < $0.upperBound && sample.endDate > $0.lowerBound }
+    }
+
+    private func loadRanges(_ url: URL) -> [ClosedRange<Date>] {
+        guard let data = try? Data(contentsOf: url),
+              let pairs = try? JSONDecoder().decode([[Double]].self, from: data) else { return [] }
+        return pairs.compactMap { pair in
+            guard pair.count == 2, pair[0] <= pair[1] else { return nil }
+            return Date(timeIntervalSince1970: pair[0])...Date(timeIntervalSince1970: pair[1])
+        }
+    }
+
+    private func saveRanges(_ ranges: [ClosedRange<Date>], to url: URL) {
+        if ranges.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let pairs = ranges.map { [$0.lowerBound.timeIntervalSince1970, $0.upperBound.timeIntervalSince1970] }
+        guard let data = try? JSONEncoder().encode(pairs) else { return }
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     /// Sleep sessions (in-bed records) in a chunk, which come from the phone relay.
@@ -286,7 +342,7 @@ final class HealthKitWriter {
             .map { Date(timeIntervalSince1970: TimeInterval($0.start))...Date(timeIntervalSince1970: TimeInterval($0.end)) }
     }
 
-    private func saveIndividually(_ samples: [HKSample], stagedCount: Int) {
+    private func saveIndividually(_ samples: [HKSample], stagedCount: Int, replacing sessions: [ClosedRange<Date>]) {
         let group = DispatchGroup()
         var saved = 0
         var mustRetry = false
@@ -309,17 +365,22 @@ final class HealthKitWriter {
             if mustRetry {
                 self.isFlushing = false
             } else {
-                self.finishSave(removing: stagedCount, saved: saved)
+                self.finishSave(removing: stagedCount, saved: saved, replacing: sessions)
             }
         }
     }
 
-    private func finishSave(removing count: Int, saved: Int) {
+    private func finishSave(removing count: Int, saved: Int, replacing sessions: [ClosedRange<Date>]) {
         if flushGeneration == stagingGeneration {
             removeStaged(count: count)
         } // else the staging file was discarded while saving; it holds only newer records now
         isFlushing = false
         logger.info("Saved \(saved) health samples to HealthKit")
+        if !sessions.isEmpty {
+            let pending = loadRanges(pendingDeletesURL)
+            saveRanges(pending + sessions.filter { !pending.contains($0) }, to: pendingDeletesURL)
+        }
+        processPendingDeletes()
         flushOnQueue() // continue with the next chunk, if any
     }
 

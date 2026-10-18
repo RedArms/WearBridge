@@ -42,9 +42,9 @@ object HealthMonitoring {
     private const val KEY_ENABLED = "enabled"
     private const val KEY_ASLEEP_SINCE = "asleep_since"
     private const val KEY_DAILY_PREFIX = "daily_total_"
-    // When the phone relay last sent sleep / heart rate. While it does, the watch
-    // leaves those to it, so Apple Health doesn't get two overlapping copies.
-    private const val KEY_RELAY_SLEEP_LAST_SEEN = "relay_sleep_last_seen"
+    // When the phone relay last sent heart rate. While it does, the watch leaves
+    // heart rate to it, so Apple Health doesn't get two overlapping series. (Sleep
+    // is always sent: the iPhone replaces the watch's sleep when relay sleep arrives.)
     private const val KEY_RELAY_HEART_RATE_LAST_SEEN = "relay_heart_rate_last_seen"
 
     /**
@@ -234,28 +234,22 @@ object HealthMonitoring {
             update.session
         }
         if (session != null) {
-            if (isRelaySending(context, KEY_RELAY_SLEEP_LAST_SEEN)) {
-                // Samsung Health's staged sleep comes through the relay; don't add a second, coarser copy.
-                Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec} skipped (relay active)")
-            } else {
-                Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec}")
-                queue(context, listOf(session))
-            }
+            // Always sent, even with the relay: the relay may deliver late (or not at all),
+            // and the iPhone drops or deletes this sleep once relay sleep covers the night.
+            Log.i(TAG, "Sleep session ${session.startEpochSec}..${session.endEpochSec}")
+            queue(context, listOf(session))
         }
     }
 
     /** Records sent by the phone relay (Samsung Health), see HealthRelayListenerService. */
     fun onRelayRecords(context: Context, records: List<HealthRecord>) {
         if (records.isEmpty()) return
-        val now = System.currentTimeMillis()
-        val editor = prefs(context).edit()
-        if (records.any { it.type == HealthProtocol.TYPE_IN_BED || it.type == HealthProtocol.TYPE_SLEEP }) {
-            editor.putLong(KEY_RELAY_SLEEP_LAST_SEEN, now)
+        // A blood pressure reading's pulse comes as a heart rate record at the same
+        // instant; that alone doesn't mean the relay reads heart rate.
+        val pressureTimes = records.filter { it.type == HealthProtocol.TYPE_BLOOD_PRESSURE }.map { it.startEpochSec }.toSet()
+        if (records.any { it.type == HealthProtocol.TYPE_HEART_RATE && it.startEpochSec !in pressureTimes }) {
+            prefs(context).edit().putLong(KEY_RELAY_HEART_RATE_LAST_SEEN, System.currentTimeMillis()).apply()
         }
-        if (records.any { it.type == HealthProtocol.TYPE_HEART_RATE }) {
-            editor.putLong(KEY_RELAY_HEART_RATE_LAST_SEEN, now)
-        }
-        editor.apply()
         // Keep them even while Health Sync is off: the relay counts them as delivered
         // and won't resend for a day. They are sent once sync is on (turning it off clears the queue).
         append(context, records)
