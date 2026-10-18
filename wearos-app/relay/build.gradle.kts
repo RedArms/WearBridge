@@ -1,6 +1,7 @@
 // Optional phone app for the Health Data Bridge: reads Samsung Health on the
 // Android phone the watch is paired with (sleep stages and score, SpO2, blood
-// pressure, heart rate) and sends it to the watch app over the Data Layer.
+// pressure, heart rate) and sends it to the iPhone app through an end-to-end
+// encrypted internet mailbox, and to the watch app over the Data Layer.
 //
 // Only built when the Samsung Health Data SDK AAR is in relay/libs/ (see
 // settings.gradle.kts). Download it from developer.samsung.com/health/data;
@@ -48,6 +49,8 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // QR code for pairing the iPhone with the internet relay
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
 }

@@ -41,7 +41,7 @@ class PeripheralManager: NSObject, ObservableObject {
     let callStateObserver = CallStateObserver()
 
     /// Saves health data sent by the watch to Apple Health
-    let healthWriter = HealthKitWriter(isEnabled: SettingsStore.isHealthSyncEnabled)
+    let healthWriter = HealthKitWriter.shared
     private var appActiveObserver: NSObjectProtocol?
 
     /// Standard BLE service UUIDs to probe for connected devices.
@@ -405,6 +405,8 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         logger.info("Central subscribed: \(central.identifier)")
+        // The watch (re)connected and woke us: a good moment to check the relay mailbox.
+        Task { @MainActor in RelayMailbox.shared.fetchIfDue(reason: "watch connected") }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
@@ -468,6 +470,8 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
         }
         logger.info("Staged \(records.count) health records from watch")
         healthWriter.flush()
+        // The watch just woke us; also pick up Samsung data waiting in the relay mailbox.
+        Task { @MainActor in RelayMailbox.shared.fetchIfDue(reason: "watch batch") }
         return .success
     }
 

@@ -10,6 +10,7 @@
 		0C1339CAF49308EE12D67173 /* BLEViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B64A6B42E55DCF830BD9501 /* BLEViewModel.swift */; };
 		0D89D3ECFF7D0E5DF95C362D /* BLEConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4027EE6B08DD2500C1BF6E94 /* BLEConstants.swift */; };
 		11498898E794E9A5ACCC4171 /* HealthKitWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A87BED5622ACE2A803759AD /* HealthKitWriter.swift */; };
+		4F8DBDE0978084B9C34B48ED /* RelayMailbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FCB0B786867673C96E4491 /* RelayMailbox.swift */; };
 		246322911A02C982C0331924 /* StatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076673E488AFB468ED2E2EF9 /* StatusView.swift */; };
 		25BCDC2B3260F8615BAF50A9 /* PairedDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C58B6974D26A3FA57422FB /* PairedDevice.swift */; };
 		3444128F7B515916482238DB /* CallStateObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDDD1DF5401A97F3ECA524FC /* CallStateObserver.swift */; };
@@ -43,6 +44,7 @@
 		03B56BE4BCAB856A9AFE50DB /* HowItWorksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HowItWorksView.swift; sourceTree = "<group>"; };
 		076673E488AFB468ED2E2EF9 /* StatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusView.swift; sourceTree = "<group>"; };
 		0A87BED5622ACE2A803759AD /* HealthKitWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitWriter.swift; sourceTree = "<group>"; };
+		D2FCB0B786867673C96E4491 /* RelayMailbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayMailbox.swift; sourceTree = "<group>"; };
 		0C4E6DA939E59F8521934572 /* QuickReplySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickReplySettingsView.swift; sourceTree = "<group>"; };
 		1BB2863CCCC6897C7008FFB7 /* AncsBridgeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AncsBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4027EE6B08DD2500C1BF6E94 /* BLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEConstants.swift; sourceTree = "<group>"; };
@@ -156,6 +158,7 @@
 			isa = PBXGroup;
 			children = (
 				0A87BED5622ACE2A803759AD /* HealthKitWriter.swift */,
+				D2FCB0B786867673C96E4491 /* RelayMailbox.swift */,
 				F13B5A1DC26CFDDD7F4A7F2E /* HealthProtocol.swift */,
 			);
 			path = Health;
@@ -268,6 +271,7 @@
 				BAF4F26B9E9AC17651F796F1 /* ConnectionState.swift in Sources */,
 				B95E39797258FB0B69F70575 /* ContentView.swift in Sources */,
 				11498898E794E9A5ACCC4171 /* HealthKitWriter.swift in Sources */,
+				4F8DBDE0978084B9C34B48ED /* RelayMailbox.swift in Sources */,
 				E2BFD6BC1F19455C4898C6F6 /* HealthProtocol.swift in Sources */,
 				98910C98FC720871E4544C25 /* HowItWorksView.swift in Sources */,
 				25BCDC2B3260F8615BAF50A9 /* PairedDevice.swift in Sources */,

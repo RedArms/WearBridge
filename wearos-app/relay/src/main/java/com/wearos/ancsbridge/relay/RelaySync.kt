@@ -35,10 +35,10 @@ class RelayState(context: Context) {
     val lastMessage: String?
         get() = prefs.getString(KEY_LAST_MESSAGE, null)
 
-    fun recordSuccess(nowEpochSec: Long, sent: Int, read: Int) {
+    fun recordSuccess(nowEpochSec: Long, summary: String) {
         prefs.edit()
             .putLong(KEY_LAST_SUCCESS, nowEpochSec)
-            .putString(KEY_LAST_MESSAGE, "Last sync ${Instant.ofEpochSecond(nowEpochSec)}: $sent new of $read records sent to the watch")
+            .putString(KEY_LAST_MESSAGE, "Last sync ${Instant.ofEpochSecond(nowEpochSec)}: $summary")
             .apply()
     }
 
@@ -73,7 +73,11 @@ object RelaySender {
     }
 }
 
-/** Reads Samsung Health and forwards new records to the watch. Runs hourly and on demand. */
+/**
+ * Reads Samsung Health and forwards new records to the iPhone: through the
+ * internet mailbox (RelayMailbox) wherever the iPhone is, and to the watch when
+ * it's connected. Runs every 15 minutes and on demand.
+ */
 class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     companion object {
@@ -85,9 +89,10 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         private val runLock = Mutex()
 
         fun schedule(context: Context) {
-            val request = PeriodicWorkRequestBuilder<RelayWorker>(1, TimeUnit.HOURS).build()
+            // 15 minutes: the sleep reaches the iPhone soon after the watch syncs it in the morning.
+            val request = PeriodicWorkRequestBuilder<RelayWorker>(15, TimeUnit.MINUTES).build()
             WorkManager.getInstance(context)
-                .enqueueUniquePeriodicWork(PERIODIC_WORK, ExistingPeriodicWorkPolicy.KEEP, request)
+                .enqueueUniquePeriodicWork(PERIODIC_WORK, ExistingPeriodicWorkPolicy.UPDATE, request)
         }
 
         fun syncNow(context: Context) {
@@ -103,16 +108,35 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             val from = Instant.ofEpochSecond(SyncWindow.startEpochSec(now.epochSecond, state.lastSuccessEpochSec))
             val records = SamsungHealthReader(applicationContext).read(from, now)
             val fresh = state.sentLog.filterUnsent(records, now.epochSecond)
-            RelaySender.send(applicationContext, fresh)
+
+            // Internet path: queued durably, re-posted until the iPhone confirms.
+            val mailbox = RelayMailbox(applicationContext)
+            mailbox.enqueue(fresh, now.epochSecond)
+
+            // Watch path, when it's around (it also tells the watch to leave heart rate to us).
+            val watch = try {
+                RelaySender.send(applicationContext, fresh)
+                "watch: sent"
+            } catch (e: RelaySender.NoWatchException) {
+                null
+            }
+
+            val internet = mailbox.sync(now.epochSecond)
+            if (watch == null && !mailbox.enabled) {
+                // Not Result.retry(): on periodic work its backoff grows to 5 h, so the
+                // next regular run (15 min) comes sooner.
+                state.recordFailure(now.epochSecond, "the watch is not connected and the internet relay is off")
+                return@withLock Result.success()
+            }
             state.sentLog.markSent(fresh, now.epochSecond)
-            state.recordSuccess(now.epochSecond, sent = fresh.size, read = records.size)
-            Log.i(TAG, "Sent ${fresh.size} of ${records.size} records ($from..$now)")
+            state.recordSuccess(
+                now.epochSecond,
+                "${fresh.size} new of ${records.size} records. ${watch ?: "watch: not connected"}. $internet"
+            )
+            Log.i(TAG, "Relayed ${fresh.size} of ${records.size} records ($from..$now); ${watch ?: "no watch"}; $internet")
             Result.success()
         } catch (e: CancellationException) {
             throw e
-        } catch (e: RelaySender.NoWatchException) {
-            state.recordFailure(now.epochSecond, e.message ?: "watch not connected")
-            Result.retry()
         } catch (e: Exception) {
             Log.e(TAG, "Relay run failed", e)
             state.recordFailure(now.epochSecond, SamsungHealthReader.explain(e) ?: (e.message ?: e.toString()))

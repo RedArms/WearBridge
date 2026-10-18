@@ -109,12 +109,12 @@ What syncs, when the watch supports it: heart rate, steps, walking + running dis
 
 #### Phone relay for Samsung watches (sleep stages, SpO2, blood pressure)
 
-If your Galaxy Watch is also paired with an Android phone running Samsung Health (kept at home is fine), the optional relay app adds what Samsung Health measured: sleep with stages (awake, light → Core, deep, REM) and score, blood oxygen, blood pressure (calibrated with Samsung Health Monitor) and heart rate. While it sends sleep and heart rate, the watch leaves those to it, and its staged sleep replaces the watch's basic sleep for the same nights.
+If your Galaxy Watch is also paired with an Android phone running Samsung Health (kept at home is fine), the optional relay app adds what Samsung Health measured: sleep with stages (awake, light → Core, deep, REM) and score, blood oxygen, blood pressure (calibrated with Samsung Health Monitor) and heart rate. While it sends heart rate, the watch leaves heart rate to it, and its staged sleep replaces the watch's basic sleep for the same nights.
 
 1. Download the [Samsung Health Data SDK](https://developer.samsung.com/health/data) and put its AAR in `wearos-app/relay/libs/` (its license doesn't allow committing it).
 2. In Samsung Health on the phone: Settings → About Samsung Health → tap the version 10 times → **Developer mode (Samsung Health Data SDK)** → on.
 3. `cd wearos-app && ./gradlew :relay:assembleDebug`, install `relay-debug.apk` on the phone, open **WearBridge Relay** and tap **Grant Samsung Health access**. Build it on the same machine as the watch app: both must share the application ID and signing key.
-4. The relay syncs hourly through the watch, which forwards to the iPhone as above.
+4. Pair the iPhone with the internet relay once: the relay shows a QR code, scan it with the iPhone camera (or copy the link and use **Paste relay link** in the iPhone app's Settings). The relay phone can then stay at home on Wi-Fi: every 15 minutes it sends new data to the iPhone over the internet, end-to-end encrypted (AES-256-GCM, key shared only through the QR code), through an [ntfy](https://ntfy.sh) mailbox. You can point it at your own ntfy server. It also sends to the watch whenever the watch is nearby.
 
 Apple Health doesn't let third-party apps write ECG or skin temperature, so those stay in Samsung Health.
 
