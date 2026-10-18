@@ -59,6 +59,12 @@ class CallStateObserver: NSObject {
         }
     }
 
+    /// The state right now, straight from CallKit (for reads that may arrive before `callChanged`).
+    func freshState() -> UInt8 {
+        guard isObserving else { return BLEConstants.callStateIdle }
+        return Self.state(of: callObserver.calls.map(Self.info), previous: currentState)
+    }
+
     private static func info(_ call: CXCall) -> CallInfo {
         CallInfo(isOutgoing: call.isOutgoing, hasConnected: call.hasConnected, hasEnded: call.hasEnded)
     }

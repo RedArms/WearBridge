@@ -60,7 +60,7 @@ struct HowItWorksView: View {
                         .font(.headline)
                         .foregroundColor(.green)
 
-                    Text("Everything stays between your iPhone and watch over a direct Bluetooth connection. No data is sent to any server, cloud, or third party. The companion app is optional — ANCS works at the iOS system level once devices are bonded.")
+                    Text("Notifications and calls stay between your iPhone and watch over a direct Bluetooth connection. The only exception is the optional Samsung relay: it sends health data end-to-end encrypted through a mailbox server (ntfy), which only sees ciphertext. The companion app is optional — ANCS works at the iOS system level once devices are bonded.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }

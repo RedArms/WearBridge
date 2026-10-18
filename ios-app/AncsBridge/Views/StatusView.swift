@@ -111,14 +111,14 @@ struct StatusView: View {
                                 .fontWeight(.bold)
                                 .foregroundColor(.primary)
 
-                            Text("Never miss a call, message, or alert while your phone is across the room. WearBridge mirrors your iPhone notifications to your Wear OS watch in real time — directly over Bluetooth, with nothing leaving your devices.")
+                            Text("Never miss a call, message, or alert while your phone is across the room. WearBridge mirrors your iPhone notifications to your Wear OS watch in real time — directly over Bluetooth, with nothing leaving your devices (except the optional, end-to-end encrypted Samsung relay).")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                                 .lineSpacing(3)
 
                             // Trust points
                             VStack(alignment: .leading, spacing: 6) {
-                                trustPoint(icon: "lock.shield", text: "End-to-end local — no servers, no cloud")
+                                trustPoint(icon: "lock.shield", text: "Local Bluetooth — no account, no cloud")
                                 trustPoint(icon: "bolt", text: "Instant delivery via BLE, under 1 second")
                                 trustPoint(icon: "apps.iphone", text: "75+ apps with native icons")
                             }
@@ -433,7 +433,7 @@ struct FeatureDetailSheet: View {
                         featureDetail(icon: "arrow.triangle.2.circlepath", color: .orange, title: "Auto Reconnect",
                                       description: "Stays connected with exponential backoff. Auto-starts on watch reboot.")
                         featureDetail(icon: "lock.shield", color: .mint, title: "Fully Local",
-                                      description: "No cloud, no server, no account. Direct Bluetooth Low Energy only. Your data never leaves your devices.")
+                                      description: "No cloud, no account. Notifications and calls go over Bluetooth Low Energy only. The optional Samsung relay passes health data end-to-end encrypted through a mailbox server that can't read it.")
                         featureDetail(icon: "waveform", color: .pink, title: "Haptic Feedback",
                                       description: "Category-aware vibration patterns. Gentle tap for messages, double-tap for calls.")
                     }

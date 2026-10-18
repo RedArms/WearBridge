@@ -36,6 +36,11 @@ class PeripheralManager: NSObject, ObservableObject {
     private var wakeAlarmRingingSince: Date?
     private static let wakeAlarmReplayWindow: TimeInterval = 10 * 60
     private var serviceAdded = false
+    /// Notifications that didn't fit in the transmit queue, latest value per characteristic,
+    /// resent from `peripheralManagerIsReady(toUpdateSubscribers:)`.
+    private var pendingUpdates: [CBUUID: (characteristic: CBMutableCharacteristic, data: Data, centrals: [CBCentral]?)] = [:]
+    /// Set while a screen wants the iPhone to be discoverable, so advertising (re)starts once Bluetooth is on.
+    private var wantsAdvertising = false
     /// Set when state restoration brought back a companion service from an older version of the app.
     private var needsServiceRebuild = false
     private var scanTimer: Timer?
@@ -140,8 +145,7 @@ class PeripheralManager: NSObject, ObservableObject {
     /// Push call state to all subscribed watches via BLE notification.
     private func notifyCallState(_ state: UInt8) {
         guard let char = callStateCharacteristic else { return }
-        let data = Data([state])
-        let sent = peripheralManager.updateValue(data, for: char, onSubscribedCentrals: nil)
+        let sent = sendUpdate(Data([state]), for: char)
         let stateStr: String
         switch state {
         case BLEConstants.callStateRinging: stateStr = "ringing"
@@ -150,6 +154,18 @@ class PeripheralManager: NSObject, ObservableObject {
         default: stateStr = "idle"
         }
         logger.info("Call state BLE notify: \(stateStr), sent=\(sent)")
+    }
+
+    /// Notifies subscribers; when the transmit queue is full, keeps the value and resends it
+    /// as soon as Core Bluetooth has room (a newer value for the same characteristic replaces it).
+    @discardableResult
+    private func sendUpdate(_ data: Data, for characteristic: CBMutableCharacteristic, to centrals: [CBCentral]? = nil) -> Bool {
+        if peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: centrals) {
+            pendingUpdates[characteristic.uuid] = nil
+            return true
+        }
+        pendingUpdates[characteristic.uuid] = (characteristic, data, centrals)
+        return false
     }
 
     // MARK: - Wake Alarm
@@ -290,8 +306,9 @@ class PeripheralManager: NSObject, ObservableObject {
     // MARK: - Advertising
 
     func startAdvertising() {
+        wantsAdvertising = true
         guard peripheralManager.state == .poweredOn else {
-            logger.warning("Cannot advertise: Bluetooth not powered on")
+            logger.warning("Cannot advertise yet: Bluetooth not powered on")
             return
         }
 
@@ -309,6 +326,7 @@ class PeripheralManager: NSObject, ObservableObject {
     }
 
     func stopAdvertising() {
+        wantsAdvertising = false
         peripheralManager.stopAdvertising()
         isAdvertising = false
         logger.info("Stopped advertising")
@@ -387,12 +405,13 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
                 needsServiceRebuild = false
             }
             setupServices()
-            if settingsStore.autoAdvertise {
+            if wantsAdvertising || settingsStore.autoAdvertise {
                 startAdvertising()
             }
         case .poweredOff, .resetting:
             // Core Bluetooth drops published services; add them again when it's back.
             serviceAdded = false
+            pendingUpdates = [:]
             isAdvertising = false
             discoveredWatches = []
         default:
@@ -419,7 +438,14 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
            wakeAlarmState == BLEConstants.wakeAlarmRinging,
            let since = wakeAlarmRingingSince, Date().timeIntervalSince(since) < Self.wakeAlarmReplayWindow,
            let wakeAlarmCharacteristic {
-            peripheral.updateValue(Data([wakeAlarmState]), for: wakeAlarmCharacteristic, onSubscribedCentrals: [central])
+            sendUpdate(Data([wakeAlarmState]), for: wakeAlarmCharacteristic, to: [central])
+        }
+    }
+
+    func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        for (uuid, update) in pendingUpdates {
+            guard peripheral.updateValue(update.data, for: update.characteristic, onSubscribedCentrals: update.centrals) else { return }
+            pendingUpdates[uuid] = nil
         }
     }
 
@@ -439,7 +465,8 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
             request.value = Data([0x01])
             peripheral.respond(to: request, withResult: .success)
         } else if request.characteristic.uuid == BLEConstants.callStateCharacteristicUUID {
-            request.value = Data([callStateObserver.currentState])
+            // A read can be what woke the app: ask CallKit now rather than trust a stale value.
+            request.value = Data([callStateObserver.freshState()])
             peripheral.respond(to: request, withResult: .success)
         } else if request.characteristic.uuid == BLEConstants.wakeAlarmCharacteristicUUID {
             request.value = Data([wakeAlarmState])

@@ -115,14 +115,11 @@ struct AddWatchView: View {
                 }
             }
             .onAppear {
-                if !viewModel.peripheralManager.isAdvertising {
-                    viewModel.toggleAdvertising()
-                }
+                // Also starts later if Bluetooth isn't on yet.
+                viewModel.peripheralManager.startAdvertising()
             }
             .onDisappear {
-                if viewModel.peripheralManager.isAdvertising {
-                    viewModel.toggleAdvertising()
-                }
+                viewModel.peripheralManager.stopAdvertising()
             }
         }
     }

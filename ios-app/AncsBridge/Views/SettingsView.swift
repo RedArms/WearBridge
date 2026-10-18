@@ -123,7 +123,7 @@ struct SettingsView: View {
                 } header: {
                     Text("About")
                 } footer: {
-                    Text("WearBridge uses Apple's ANCS to forward notifications over Bluetooth. All data stays local.")
+                    Text("WearBridge uses Apple's ANCS to forward notifications over Bluetooth. Only the optional Samsung relay uses the internet, end-to-end encrypted.")
                 }
             }
             .navigationTitle("Settings")

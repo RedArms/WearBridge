@@ -13,6 +13,9 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
 
     private let logger = Logger(subsystem: "com.wearos.ancsbridge", category: "QuickReply")
     private static let urlKey = "wearbridgeShortcutURL"
+    /// Shortcut to run once the app is active (a tap on the notification can cold-launch it).
+    private var pendingURL: URL?
+    private var activeObserver: NSObjectProtocol?
 
     private override init() {
         super.init()
@@ -22,6 +25,14 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
     /// still runs the shortcut.
     func activate() {
         UNUserNotificationCenter.current().delegate = self
+        guard activeObserver == nil else { return }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, let url = self.pendingURL else { return }
+            self.pendingURL = nil
+            self.open(url)
+        }
     }
 
     /// Asks for notification permission once (iOS remembers the answer). Call from the foreground.
@@ -55,6 +66,10 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
             notify(payload, url: url)
             return
         }
+        open(url)
+    }
+
+    private func open(_ url: URL) {
         UIApplication.shared.open(url) { [logger] success in
             if success {
                 logger.info("Opened WearBridge Reply shortcut")
@@ -97,7 +112,12 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
               let string = response.notification.request.content.userInfo[Self.urlKey] as? String,
               let url = URL(string: string) else { return }
         DispatchQueue.main.async {
-            UIApplication.shared.open(url)
+            // iOS refuses to open URLs until the app is active, which a cold launch isn't yet.
+            if UIApplication.shared.applicationState == .active {
+                self.open(url)
+            } else {
+                self.pendingURL = url
+            }
         }
     }
 
