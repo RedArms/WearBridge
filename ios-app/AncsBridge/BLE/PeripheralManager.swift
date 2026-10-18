@@ -32,6 +32,9 @@ class PeripheralManager: NSObject, ObservableObject {
     private var callStateCharacteristic: CBMutableCharacteristic?
     private var wakeAlarmCharacteristic: CBMutableCharacteristic?
     private var wakeAlarmState = BLEConstants.wakeAlarmStopped
+    /// When the alarm started ringing, to replay it to a watch that (re)subscribes soon after.
+    private var wakeAlarmRingingSince: Date?
+    private static let wakeAlarmReplayWindow: TimeInterval = 10 * 60
     private var serviceAdded = false
     /// Set when state restoration brought back a companion service from an older version of the app.
     private var needsServiceRebuild = false
@@ -157,9 +160,12 @@ class PeripheralManager: NSObject, ObservableObject {
     @MainActor
     func setWakeAlarm(ringing: Bool) async -> Bool {
         wakeAlarmState = ringing ? BLEConstants.wakeAlarmRinging : BLEConstants.wakeAlarmStopped
-        // When an automation launched the app, Bluetooth and the restored service need a moment.
+        wakeAlarmRingingSince = ringing ? Date() : nil
+        // When an automation launched the app, Bluetooth, the service and the watch's
+        // subscription (it re-subscribes after the service is republished) need a moment.
         var waited = 0
-        while (peripheralManager.state != .poweredOn || wakeAlarmCharacteristic == nil) && waited < 50 {
+        while (peripheralManager.state != .poweredOn || wakeAlarmCharacteristic == nil
+               || wakeAlarmCharacteristic?.subscribedCentrals?.isEmpty != false) && waited < 100 {
             try? await Task.sleep(for: .milliseconds(100))
             waited += 1
         }
@@ -407,6 +413,21 @@ extension PeripheralManager: CBPeripheralManagerDelegate {
         logger.info("Central subscribed: \(central.identifier)")
         // The watch (re)connected and woke us: a good moment to check the relay mailbox.
         Task { @MainActor in RelayMailbox.shared.fetchIfDue(reason: "watch connected") }
+        // A watch that subscribes while the alarm rings (e.g. after the service was
+        // republished by an automation launch) gets the ringing state right away.
+        if characteristic.uuid == BLEConstants.wakeAlarmCharacteristicUUID,
+           wakeAlarmState == BLEConstants.wakeAlarmRinging,
+           let since = wakeAlarmRingingSince, Date().timeIntervalSince(since) < Self.wakeAlarmReplayWindow,
+           let wakeAlarmCharacteristic {
+            peripheral.updateValue(Data([wakeAlarmState]), for: wakeAlarmCharacteristic, onSubscribedCentrals: [central])
+        }
+    }
+
+    func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error {
+            logger.error("Couldn't publish the companion service: \(error.localizedDescription)")
+            serviceAdded = false // try again on the next power-on
+        }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
