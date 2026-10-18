@@ -173,6 +173,7 @@ class AncsService : Service() {
                     is ConnectionState.Bonding -> "Pairing with ${state.deviceName ?: "iPhone"}..."
                     is ConnectionState.Connected -> {
                         subscriptionTime = System.currentTimeMillis()
+                        removedUids.clear() // UIDs are only unique within an ANCS session
                         "Connected to ${state.deviceName ?: "iPhone"}"
                     }
                     is ConnectionState.Disconnected -> "Disconnected"
@@ -271,6 +272,7 @@ class AncsService : Service() {
 
         when {
             event.isAdded || event.isModified -> {
+                if (event.isAdded) removedUids.remove(event.notificationUid)
                 // Skip pre-existing notifications at the NS level — don't even
                 // fetch attributes. This avoids GATT writes that trigger system haptics.
                 if (event.isPreExisting) {
