@@ -17,6 +17,10 @@
 - Calories: Health Services CALORIES mixes basal + active; needs splitting before mapping to activeEnergyBurned
 - Show pending record count / last sync time on the watch and in the iOS app
 
+## Quick Reply List Sync
+- The iOS app's editable reply list stays on the iPhone; the watch uses its hard-coded `QUICK_REPLIES`
+- Sync it over a companion characteristic (read on connect, notify on change)
+
 ## iOS Shortcut Template
 - Provide a pre-built "WearBridge Reply" shortcut for download
 - Currently users must create the iOS Shortcut manually to handle quick reply text

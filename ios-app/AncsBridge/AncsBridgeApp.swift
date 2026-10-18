@@ -9,12 +9,15 @@ struct AncsBridgeApp: App {
         // Core Bluetooth can relaunch the app in the background (state restoration, a
         // watch write); the restoring manager must exist even if no scene is built.
         _ = PeripheralManager.shared
+        // Before any scene: a tap on a quick reply notification may be what launches the app.
+        QuickReplyLauncher.shared.activate()
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(bleViewModel)
+                .task { QuickReplyLauncher.shared.requestAuthorization() }
                 // Pairing link from the phone relay's QR code: wearbridge://relay?...
                 .onOpenURL { url in
                     RelayMailbox.shared.pair(with: url)
