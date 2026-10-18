@@ -111,8 +111,10 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         } catch (e: CancellationException) {
             throw e
         } catch (e: RelaySender.NoWatchException) {
+            // Not Result.retry(): on periodic work its backoff grows to 5 h, so the
+            // next regular run comes sooner.
             state.recordFailure(now.epochSecond, e.message ?: "watch not connected")
-            Result.retry()
+            Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "Relay run failed", e)
             state.recordFailure(now.epochSecond, SamsungHealthReader.explain(e) ?: (e.message ?: e.toString()))
