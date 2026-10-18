@@ -85,6 +85,8 @@ class AncsService : Service() {
     private val dataSourceAssembler = DataSourceAssembler()
     /** Completed when the Data Source response to the current request is complete. */
     private var pendingResponse: CompletableDeferred<Unit>? = null
+    /** Recently removed notifications: queued attribute requests for them are skipped. */
+    private val removedUids = ArrayDeque<Long>()
     private lateinit var appNames: AppNameStore
 
     // Track active notification IDs in posting order (oldest first) for auto-cleanup
@@ -147,6 +149,14 @@ class AncsService : Service() {
         scope.launch {
             connectionManager.callStateEvents.collect { data ->
                 handleCompanionCallState(data)
+            }
+        }
+
+        // A rejected Control Point request gets no Data Source response: don't wait 2 s for it.
+        scope.launch {
+            connectionManager.controlPointWriteFailures.collect {
+                dataSourceAssembler.reset()
+                pendingResponse?.complete(Unit)
             }
         }
 
@@ -326,6 +336,9 @@ class AncsService : Service() {
                 }
             }
             event.isRemoved -> {
+                removedUids.addLast(event.notificationUid)
+                while (removedUids.size > 64) removedUids.removeFirst()
+
                 // Cancel the Android notification and remove from tracking
                 val removedId = notificationIdForUid(event.notificationUid)
                 notificationManager.cancel(removedId)
@@ -421,6 +434,11 @@ class AncsService : Service() {
 
     private suspend fun processAttributeRequest(request: AttributeRequest) {
         val event = request.event
+        // Already gone on the iPhone: fetching it would only fail (and every GATT write can buzz the watch).
+        if (event.notificationUid in removedUids) {
+            Log.d(TAG, "Skipping attributes of removed notification uid=${event.notificationUid}")
+            return
+        }
 
         // Prepare the assembler to expect this response
         dataSourceAssembler.expectNotificationAttributes(

@@ -53,6 +53,10 @@ class BleConnectionManager(private val context: Context) {
     private val _callStateEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 16)
     val callStateEvents: SharedFlow<ByteArray> = _callStateEvents.asSharedFlow()
 
+    /** Control Point writes the iPhone rejected (e.g. 0xA2: the notification is gone); no Data Source response follows. */
+    private val _controlPointWriteFailures = MutableSharedFlow<Int>(extraBufferCapacity = 8)
+    val controlPointWriteFailures: SharedFlow<Int> = _controlPointWriteFailures.asSharedFlow()
+
     private var gatt: BluetoothGatt? = null
     private var targetDevice: BluetoothDevice? = null
     private var reconnectJob: Job? = null
@@ -210,6 +214,9 @@ class BleConnectionManager(private val context: Context) {
         onCharacteristicWritten = { characteristic, status ->
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Characteristic write failed: $status for ${characteristic.uuid}")
+                if (characteristic.uuid == AncsConstants.CONTROL_POINT_UUID) {
+                    _controlPointWriteFailures.tryEmit(status)
+                }
             }
         },
         onMtuChanged = { mtu, status ->
