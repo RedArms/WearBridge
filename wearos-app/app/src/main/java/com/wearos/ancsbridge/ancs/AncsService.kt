@@ -115,6 +115,8 @@ class AncsService : Service() {
     private val dataSourceAssembler = DataSourceAssembler()
     /** Completed when the Data Source response to the current request is complete. */
     private var pendingResponse: CompletableDeferred<Unit>? = null
+    /** Recently removed notifications: queued attribute requests for them are skipped. */
+    private val removedUids = ArrayDeque<Long>()
     private lateinit var appNames: AppNameStore
 
     // Track active notification IDs in posting order (oldest first) for auto-cleanup
@@ -192,6 +194,14 @@ class AncsService : Service() {
             }
         }
 
+        // A rejected Control Point request gets no Data Source response: don't wait 2 s for it.
+        scope.launch {
+            connectionManager.controlPointWriteFailures.collect {
+                dataSourceAssembler.reset()
+                pendingResponse?.complete(Unit)
+            }
+        }
+
         // Update service notification and shared state based on connection state
         scope.launch {
             connectionManager.connectionState.collectLatest { state ->
@@ -205,6 +215,7 @@ class AncsService : Service() {
                     is ConnectionState.Bonding -> "Pairing with ${state.deviceName ?: "iPhone"}..."
                     is ConnectionState.Connected -> {
                         subscriptionTime = System.currentTimeMillis()
+                        removedUids.clear() // UIDs are only unique within an ANCS session
                         "Connected to ${state.deviceName ?: "iPhone"}"
                     }
                     is ConnectionState.Disconnected -> "Disconnected"
@@ -362,6 +373,7 @@ class AncsService : Service() {
 
         when {
             event.isAdded || event.isModified -> {
+                if (event.isAdded) removedUids.remove(event.notificationUid)
                 // Skip pre-existing notifications at the NS level — don't even
                 // fetch attributes. This avoids GATT writes that trigger system haptics.
                 if (event.isPreExisting) {
@@ -427,6 +439,9 @@ class AncsService : Service() {
                 }
             }
             event.isRemoved -> {
+                removedUids.addLast(event.notificationUid)
+                while (removedUids.size > 64) removedUids.removeFirst()
+
                 // The iPhone alarm was stopped or snoozed there: stop the watch alarm too.
                 if (clockAlarm?.uid == event.notificationUid) {
                     clockAlarm = null
@@ -524,6 +539,11 @@ class AncsService : Service() {
 
     private suspend fun processAttributeRequest(request: AttributeRequest) {
         val event = request.event
+        // Already gone on the iPhone: fetching it would only fail (and every GATT write can buzz the watch).
+        if (event.notificationUid in removedUids) {
+            Log.d(TAG, "Skipping attributes of removed notification uid=${event.notificationUid}")
+            return
+        }
         lastAncsActivityMs = System.currentTimeMillis() // keeps health sync off while the queue drains
 
         // Prepare the assembler to expect this response
