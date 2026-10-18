@@ -163,7 +163,7 @@ class DataSourceAssembler {
                 }
                 else -> {
                     Log.w(TAG, "Unknown command ID: $commandId")
-                    reset()
+                    dropCurrentResponse()
                     return null
                 }
             }
@@ -238,7 +238,11 @@ class DataSourceAssembler {
         return null
     }
 
-    /** False (and drops everything) when a response doesn't answer the pending request. */
+    /**
+     * False (and drops that response) when it doesn't answer the pending request,
+     * e.g. a late response to a request that timed out. The pending request is
+     * still expected: its own response may come right after.
+     */
     private fun isExpected(command: Int, uid: Long?, appId: String?): Boolean {
         val matches = command == expectedCommand &&
             (uid == null || uid == expectedUid) &&
@@ -246,9 +250,25 @@ class DataSourceAssembler {
         if (!matches) {
             Log.w(TAG, "Dropping a Data Source response for command $command (uid=$uid app=$appId); " +
                 "expected command $expectedCommand")
-            reset()
+            dropCurrentResponse()
         }
         return matches
+    }
+
+    /** Forgets the bytes of the response being read, but keeps waiting for the expected one. */
+    private fun dropCurrentResponse() {
+        buffer.reset()
+        headerParsed = false
+        commandId = -1
+        attributes.clear()
+        currentAttrIndex = 0
+        currentAttrId = -1
+        currentAttrLength = -1
+        currentAttrBytesRead = 0
+        currentAttrData.reset()
+        state = State.READING_HEADER
+        if (expectedCommand == AncsConstants.COMMAND_GET_NOTIFICATION_ATTRIBUTES) notificationUid = expectedUid
+        if (expectedCommand == AncsConstants.COMMAND_GET_APP_ATTRIBUTES) appIdentifier = expectedAppIdentifier
     }
 
     private fun buildNotification(): AncsNotification {

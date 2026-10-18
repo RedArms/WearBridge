@@ -224,6 +224,23 @@ class DataSourceAssemblerTest {
     }
 
     @Test
+    fun `the expected response still parses after a late one was dropped`() {
+        assembler.expectNotificationAttributes(
+            uid = 7,
+            requestedAttributes = listOf(AncsConstants.ATTR_APP_IDENTIFIER, AncsConstants.ATTR_TITLE),
+            category = AncsConstants.CATEGORY_SOCIAL,
+            flags = 0
+        )
+        val late = buildResponse(commandId = 0, uid = 6, attributes = listOf(0 to "com.apple.MobileSMS", 1 to "Old"))
+        assertNull(assembler.onDataReceived(late))
+        val expected = buildResponse(commandId = 0, uid = 7, attributes = listOf(0 to "com.apple.MobileSMS", 1 to "New"))
+        val notification = assembler.onDataReceived(expected)
+        assertEquals(7L, notification!!.uid)
+        assertEquals("New", notification.title)
+        assertEquals(AncsConstants.CATEGORY_SOCIAL, notification.categoryId)
+    }
+
+    @Test
     fun `response for another notification is dropped`() {
         assembler.expectNotificationAttributes(
             uid = 7,
