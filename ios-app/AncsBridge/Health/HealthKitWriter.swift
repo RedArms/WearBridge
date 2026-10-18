@@ -15,6 +15,9 @@ import os.log
 /// so a batch the watch resends after a lost acknowledgement is not duplicated.
 final class HealthKitWriter {
 
+    /// One writer for the BLE path and the relay mailbox: both stage into the same file.
+    static let shared = HealthKitWriter(isEnabled: SettingsStore.isHealthSyncEnabled)
+
     static let syncIdentifierPrefix = "wearbridge"
 
     /// Same cap as the watch-side queue; the oldest records go first.

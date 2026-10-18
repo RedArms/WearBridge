@@ -97,12 +97,21 @@ If the watch only offers `*_DAILY` totals passively, `DailyTotals` turns them in
 
 Health Services only exposes an "asleep" state. Samsung Health on the paired Android phone has the full picture, readable through the Samsung Health Data SDK in Samsung Health's developer mode (personal use, read-only, no partner registration).
 
-1. `:relay` (phone, same applicationId `com.wearos.ancsbridge` and signing key as the watch app, which the Data Layer requires) reads sleep (sessions, stages, score), SpO2, blood pressure (+ pulse) and heart rate. `RelayWorker` runs hourly via WorkManager, re-reading 36 h before the last success (30 days on the first run); `SentLog` skips records sent in the last 24 h.
+1. `:relay` (phone, same applicationId `com.wearos.ancsbridge` and signing key as the watch app, which the Data Layer requires) reads sleep (sessions, stages, score), SpO2, blood pressure (+ pulse) and heart rate. `RelayWorker` runs every 15 min via WorkManager, re-reading 36 h before the last success (30 days on the first run); `SentLog` skips records sent in the last 24 h.
 2. Batches (same wire format, ≤255 records) go to the watch with `MessageClient` on path `/wearbridge/health/batch`.
 3. Watch: `HealthRelayListenerService` appends them to the same queue, so they reach the iPhone over the existing BLE link. While the relay sends sleep (or heart rate), i.e. it did in the last 3 days, the watch stops sending its own sleep (or heart rate), so Health doesn't get two overlapping copies. The relay re-reads from 36 h before its last success, so it fills any gap when it comes back.
 4. iPhone: before saving a chunk with in-bed sessions, `HealthKitWriter` deletes the watch's own sleep samples (tagged `WearBridgeWatchSleep`) inside those sessions, so staged sleep replaces basic sleep. Relay samples without a stage are kept.
 
-The relay module is only included in the Gradle build when the SDK AAR is in `wearos-app/relay/libs/` (not redistributable, gitignored). The `:shared` module holds `HealthProtocol` for both apps.
+The relay module is only included in the Gradle build when the SDK AAR is in `wearos-app/relay/libs/` (not redistributable, gitignored). The `:shared` module holds `HealthProtocol` and `MailboxCodec` for both apps.
+
+### Internet relay (mailbox)
+
+So the relay phone can stay at home and the watch needs no internet, the relay also sends straight to the iPhone app over the internet:
+
+1. Pairing: the relay creates a random ntfy topic and an AES-256 key (`MailboxCodec.newPairing`) and shows `wearbridge://relay?s=<server>&t=<topic>&k=<key>` as a QR code. The iPhone camera opens the link in WearBridge (`CFBundleURLTypes`), which keeps it in the Keychain (`RelayMailbox`). Default server `https://ntfy.sh`; any ntfy server works (self-hosted, https).
+2. Relay: new records go into `MailboxOutbox` (on disk). Heart-rate-only records are grouped for up to 1 h, other types are packed at once, ≤170 records per message so a message stays under ntfy's 4096-byte limit. Messages are posted to the topic and re-posted every 6 h until acknowledged (ntfy keeps messages 12 h), dropped after 7 days. `RelayWorker` now runs every 15 min; it still sends to the watch too when connected (the iPhone deduplicates by sync identifier).
+3. Format (`MailboxCodec.kt` / `RelayMailbox.swift`, shared golden vector): text = base64url(nonce:12 | AES-256-GCM | tag:16), AAD `wearbridge.relay.v1`; plaintext = kind:u8 | body; kind 1 = seq:u32 | HealthProtocol batch; kind 2 (ack) = count:u16 | seq:u32 × count.
+4. iPhone: polls `<topic>/json?poll=1&since=<last id>` when the app comes to the foreground, when the watch writes over BLE (at most every 10 min), and in background app refresh (`com.wearos.ancsbridge.relay-fetch`); stages records through `HealthKitWriter.shared`, then posts encrypted acks to `<topic>-ack`, and only then remembers the last message id. The relay reads acks before each post.
 
 ## Quick Reply Flow
 

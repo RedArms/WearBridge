@@ -20,6 +20,13 @@ targets:
         NSHealthUpdateUsageDescription: "WearBridge saves heart rate, steps, distance, floors, sleep, blood oxygen and blood pressure from your watch to Apple Health."
         UIBackgroundModes:
           - bluetooth-peripheral
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.wearos.ancsbridge.relay-fetch
+        CFBundleURLTypes:
+          - CFBundleURLName: com.wearos.ancsbridge.relay
+            CFBundleURLSchemes:
+              - wearbridge
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

@@ -5,6 +5,9 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Internet relay: posts encrypted batches to the mailbox the iPhone app polls -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <queries>
         <package android:name="com.sec.android.app.shealth" />
     </queries>

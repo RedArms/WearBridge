@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject var viewModel: BLEViewModel
+    @ObservedObject private var relayMailbox = RelayMailbox.shared
     @State private var liveCallStatusEnabled: Bool = false
     @State private var healthSyncEnabled: Bool = false
 
@@ -66,6 +68,42 @@ struct SettingsView: View {
                     .onReceive(viewModel.peripheralManager.settingsStore.$healthSync) { enabled in
                         healthSyncEnabled = enabled
                     }
+                }
+
+                // Samsung data from the phone relay, over the internet
+                Section {
+                    if let pairing = relayMailbox.pairing {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Paired with the phone relay")
+                                Text(relayMailbox.status.isEmpty ? "Through \(pairing.server.host ?? pairing.server.absoluteString)" : relayMailbox.status)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .foregroundColor(.green)
+                        }
+                        Button("Check now") {
+                            Task { await relayMailbox.fetch(reason: "manual") }
+                        }
+                        Button("Unpair", role: .destructive) {
+                            relayMailbox.unpair()
+                        }
+                    } else {
+                        Text("On the Android phone, open WearBridge Relay and scan its QR code with the iPhone camera. Or copy its link and paste it here.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button("Paste relay link") {
+                            if let text = UIPasteboard.general.string, let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                                relayMailbox.pair(with: url)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Samsung relay (internet)")
+                } footer: {
+                    Text("Sleep stages, blood oxygen and blood pressure arrive from the relay phone at home over the internet, end-to-end encrypted, even when the watch is away from it.")
                 }
 
                 // About

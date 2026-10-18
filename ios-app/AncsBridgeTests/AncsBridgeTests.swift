@@ -1,3 +1,4 @@
+import CryptoKit
 import HealthKit
 import XCTest
 @testable import AncsBridge
@@ -100,5 +101,42 @@ final class HealthProtocolTests: XCTestCase {
         XCTAssertNil(HealthKitWriter.makeSample(HealthRecord(type: HealthProtocol.typeSteps, start: 10, end: 5, value: 1)))
         XCTAssertNil(HealthKitWriter.makeSample(HealthRecord(type: HealthProtocol.typeHeartRate, start: 1, end: 1, value: 0)))
         XCTAssertNil(HealthKitWriter.makeSample(HealthRecord(type: HealthProtocol.typeSleep, start: 1, end: 1, value: 0)))
+    }
+}
+
+final class RelayMailboxTests: XCTestCase {
+    private let key = Data((0..<32).map { UInt8($0) })
+
+    /// Same vectors as MailboxCodecTest.kt (computed independently with Python's AES-GCM).
+    private let goldenBatch = "AAECAwQFBgcICQoLRgXWG8XkwBqNOXDjsZGfBYPWhzTwWw08OmedYnVVeFVpEK78r8HSxjROJLxyLPNBnLlpiyWljhVc"
+    private let goldenAck = "DA0ODxAREhMUFRYXmvxp3392_Fs3Kki6E7A7A6xfCGEZjAhnT7LU"
+
+    func testOpensTheGoldenBatch() throws {
+        let (seq, records) = try XCTUnwrap(RelayMailbox.openBatch(goldenBatch, key: key))
+        XCTAssertEqual(seq, 7)
+        XCTAssertEqual(records, [
+            HealthRecord(type: HealthProtocol.typeHeartRate, start: 1_760_000_000, end: 1_760_000_000, value: 72.5),
+            HealthRecord(type: HealthProtocol.typeSteps, start: 1_760_000_000, end: 1_760_000_060, value: 123),
+        ])
+    }
+
+    func testSealsTheGoldenAck() throws {
+        let nonce = try AES.GCM.Nonce(data: Data((12..<24).map { UInt8($0) }))
+        XCTAssertEqual(try RelayMailbox.sealAck([7, 8], key: key, nonce: nonce), goldenAck)
+    }
+
+    func testRejectsTheWrongKeyAndTampering() {
+        XCTAssertNil(RelayMailbox.openBatch(goldenBatch, key: Data(repeating: 7, count: 32)))
+        XCTAssertNil(RelayMailbox.openBatch(String(goldenBatch.dropLast()) + "A", key: key))
+        XCTAssertNil(RelayMailbox.openBatch(goldenAck, key: key)) // an ack isn't a batch
+    }
+
+    func testParsesThePairingLink() throws {
+        let link = "wearbridge://relay?s=https%3A%2F%2Fntfy.sh&t=wb-AbC_d-123&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+        let pairing = try XCTUnwrap(RelayMailbox.parse(try XCTUnwrap(URL(string: link))))
+        XCTAssertEqual(pairing.server.absoluteString, "https://ntfy.sh")
+        XCTAssertEqual(pairing.topic, "wb-AbC_d-123")
+        XCTAssertEqual(pairing.key, key)
+        XCTAssertNil(RelayMailbox.parse(try XCTUnwrap(URL(string: "wearbridge://relay?s=https%3A%2F%2Fntfy.sh&t=wb&k=AAAA"))))
     }
 }
