@@ -63,10 +63,14 @@ object WakeAlarm {
     }
 
     fun stop(context: Context) {
-        if (!isRinging) return
+        val app = context.applicationContext
+        if (!isRinging) {
+            // The process may have died mid-alarm: its full-screen notification can outlive it.
+            app.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+            return
+        }
         isRinging = false
         Log.i(TAG, "Wake alarm stopped")
-        val app = context.applicationContext
         handler.removeCallbacksAndMessages(null)
         app.getSystemService(Vibrator::class.java).cancel()
         app.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)

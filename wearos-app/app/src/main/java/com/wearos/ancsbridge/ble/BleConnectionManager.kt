@@ -43,8 +43,11 @@ class BleConnectionManager(private val context: Context) {
         private const val DEFAULT_ATT_MTU = 23
         private const val MAX_SERVICE_DISCOVERY_RETRIES = 2
         private const val HEALTH_WRITE_TIMEOUT_MS = 3_000L
-        private const val MAX_DESCRIPTOR_WRITE_ATTEMPTS = 10
+        /** 6 s: longer than a health write can hold the link (gotcha 17). */
+        private const val MAX_DESCRIPTOR_WRITE_ATTEMPTS = 30
         private const val DESCRIPTOR_RETRY_DELAY_MS = 200L
+        /** Health writes hold off this long after the iPhone republishes its services. */
+        private const val SERVICE_CHANGE_QUIET_MS = 5_000L
     }
 
     /** Outcome of [writeHealthData]. */
@@ -78,9 +81,14 @@ class BleConnectionManager(private val context: Context) {
     private val _wakeAlarmEvents = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
     val wakeAlarmEvents: SharedFlow<ByteArray> = _wakeAlarmEvents.asSharedFlow()
 
-    /** Control Point writes the iPhone rejected (e.g. 0xA2: the notification is gone); no Data Source response follows. */
+    /**
+     * Control Point writes the iPhone rejected (e.g. 0xA2: the notification is gone), as the
+     * command byte of the rejected write; for attribute requests, no Data Source response follows.
+     */
     private val _controlPointWriteFailures = MutableSharedFlow<Int>(extraBufferCapacity = 8)
     val controlPointWriteFailures: SharedFlow<Int> = _controlPointWriteFailures.asSharedFlow()
+    /** Command byte of the Control Point write in flight (one GATT write at a time). */
+    private var controlPointCommandInFlight = -1
 
     private var gatt: BluetoothGatt? = null
     private var targetDevice: BluetoothDevice? = null
@@ -91,6 +99,9 @@ class BleConnectionManager(private val context: Context) {
     // CCCD write queue — must serialize descriptor writes
     private val descriptorWriteQueue = LinkedList<Pair<BluetoothGattCharacteristic, BluetoothGattDescriptor>>()
     private var isWritingDescriptor = false
+    private var descriptorRetryJob: Job? = null
+    /** Until when health writes yield to the companion re-subscription after a Service Changed. */
+    @Volatile private var healthQuietUntilMs = 0L
 
     /** ATT MTU negotiated with the iPhone; sizes health batches. */
     @Volatile
@@ -199,10 +210,18 @@ class BleConnectionManager(private val context: Context) {
             // companion side only: ANCS stays subscribed (gotcha 12).
             if (notificationSourceChar != null && dataSourceChar != null) {
                 Log.i(TAG, "ANCS already subscribed, checking companion service")
-                // Fresh characteristic objects, in case handles moved.
-                ancsService.getCharacteristic(AncsConstants.NOTIFICATION_SOURCE_UUID)?.let { notificationSourceChar = it }
+                // Fresh characteristic objects, in case handles moved. A Service Changed
+                // can also drop Android's local notification registrations for its handle
+                // range: register again (local only, no GATT write, no buzz, no new session).
+                ancsService.getCharacteristic(AncsConstants.NOTIFICATION_SOURCE_UUID)?.let {
+                    notificationSourceChar = it
+                    gatt.setCharacteristicNotification(it, true)
+                }
                 ancsService.getCharacteristic(AncsConstants.CONTROL_POINT_UUID)?.let { controlPointChar = it }
-                ancsService.getCharacteristic(AncsConstants.DATA_SOURCE_UUID)?.let { dataSourceChar = it }
+                ancsService.getCharacteristic(AncsConstants.DATA_SOURCE_UUID)?.let {
+                    dataSourceChar = it
+                    gatt.setCharacteristicNotification(it, true)
+                }
                 readCompanionStatus()
                 // The companion app may have republished its service: subscribe again.
                 scope.launch {
@@ -277,10 +296,13 @@ class BleConnectionManager(private val context: Context) {
             processDescriptorWriteQueue()
         },
         onCharacteristicWritten = { characteristic, status ->
+            val command = if (characteristic.uuid == AncsConstants.CONTROL_POINT_UUID) {
+                controlPointCommandInFlight.also { controlPointCommandInFlight = -1 }
+            } else -1
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Characteristic write failed: $status for ${characteristic.uuid}")
                 if (characteristic.uuid == AncsConstants.CONTROL_POINT_UUID) {
-                    _controlPointWriteFailures.tryEmit(status)
+                    _controlPointWriteFailures.tryEmit(command)
                 }
             }
             if (characteristic.uuid == AncsConstants.HEALTH_DATA_CHARACTERISTIC_UUID) {
@@ -306,6 +328,7 @@ class BleConnectionManager(private val context: Context) {
         },
         onServicesChangedCallback = { changedGatt ->
             Log.i(TAG, "iPhone services changed, re-discovering")
+            healthQuietUntilMs = System.currentTimeMillis() + SERVICE_CHANGE_QUIET_MS
             changedGatt.discoverServices()
         }
     )
@@ -407,7 +430,9 @@ class BleConnectionManager(private val context: Context) {
 
         char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         char.value = data
-        return gatt.writeCharacteristic(char)
+        val accepted = gatt.writeCharacteristic(char)
+        if (accepted) controlPointCommandInFlight = data.firstOrNull()?.toInt() ?: -1
+        return accepted
     }
 
     /** Cached real device name read from GAP characteristic */
@@ -569,6 +594,10 @@ class BleConnectionManager(private val context: Context) {
      */
     suspend fun writeHealthData(payload: ByteArray): HealthWriteResult {
         val gatt = this.gatt ?: return HealthWriteResult.FAILED
+        // Subscriptions first: a health write in flight makes their CCCD writes fail.
+        if (isWritingDescriptor || descriptorWriteQueue.isNotEmpty() ||
+            System.currentTimeMillis() < healthQuietUntilMs
+        ) return HealthWriteResult.BUSY
         val char = gatt.getService(AncsConstants.COMPANION_SERVICE_UUID)
             ?.getCharacteristic(AncsConstants.HEALTH_DATA_CHARACTERISTIC_UUID)
             ?: return HealthWriteResult.UNSUPPORTED
@@ -608,7 +637,13 @@ class BleConnectionManager(private val context: Context) {
     fun getBondedIPhone(): BluetoothDevice? {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = bluetoothManager.adapter ?: return null
-        return adapter.bondedDevices?.firstOrNull { device ->
+        val bonded = try {
+            adapter.bondedDevices
+        } catch (e: SecurityException) {
+            Log.w(TAG, "No Bluetooth permission yet")
+            return null
+        }
+        return bonded?.firstOrNull { device ->
             val name = device.name ?: ""
             name.contains("iPhone", ignoreCase = true) ||
                 name.contains("AncsBrid", ignoreCase = true) ||
@@ -640,27 +675,34 @@ class BleConnectionManager(private val context: Context) {
         }
     }
 
+    /** Writes the next queued CCCD; a no-op while one is in flight or a retry is scheduled. */
     private fun processDescriptorWriteQueue() {
+        if (isWritingDescriptor || descriptorRetryJob?.isActive == true) return
         val gatt = this.gatt ?: return
         val (characteristic, descriptor) = descriptorWriteQueue.peek() ?: return
-        isWritingDescriptor = true
         if (gatt.writeDescriptor(descriptor)) {
+            isWritingDescriptor = true
             descriptorWriteQueue.poll()
             descriptorWriteAttempts = 0
             return
         }
-        // Another GATT operation (e.g. a health sync write) is in flight: retry
-        // shortly rather than leaving the queue stuck with isWritingDescriptor set.
-        isWritingDescriptor = false
+        // Another GATT operation (e.g. a health sync write) is in flight: retry shortly.
         descriptorWriteAttempts++
         if (descriptorWriteAttempts >= MAX_DESCRIPTOR_WRITE_ATTEMPTS) {
             Log.e(TAG, "Giving up on CCCD write for ${characteristic.uuid}")
             descriptorWriteQueue.poll()
             descriptorWriteAttempts = 0
+            if (characteristic.uuid == AncsConstants.DATA_SOURCE_UUID ||
+                characteristic.uuid == AncsConstants.NOTIFICATION_SOURCE_UUID
+            ) {
+                gatt.disconnect() // no ANCS session without them: start over
+                return
+            }
         }
-        scope.launch {
+        descriptorRetryJob = scope.launch {
             delay(DESCRIPTOR_RETRY_DELAY_MS)
-            if (!isWritingDescriptor) processDescriptorWriteQueue()
+            descriptorRetryJob = null
+            processDescriptorWriteQueue()
         }
     }
 
@@ -681,6 +723,9 @@ class BleConnectionManager(private val context: Context) {
         descriptorWriteQueue.clear()
         isWritingDescriptor = false
         descriptorWriteAttempts = 0
+        descriptorRetryJob?.cancel()
+        descriptorRetryJob = null
+        controlPointCommandInFlight = -1
     }
 
     fun destroy() {

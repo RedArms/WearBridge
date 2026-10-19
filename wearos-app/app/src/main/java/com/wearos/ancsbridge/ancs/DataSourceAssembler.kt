@@ -69,6 +69,7 @@ class DataSourceAssembler {
     // Category and flags from the original NS event (set externally)
     private var categoryId: Int = 0
     private var eventFlags: Int = 0
+    private var isUpdate = false
 
     /**
      * Start expecting a GetNotificationAttributes response.
@@ -82,9 +83,11 @@ class DataSourceAssembler {
         uid: Long,
         requestedAttributes: List<Int>,
         category: Int,
-        flags: Int
+        flags: Int,
+        isUpdate: Boolean = false
     ) {
         reset()
+        this.isUpdate = isUpdate
         notificationUid = uid
         expectedCommand = AncsConstants.COMMAND_GET_NOTIFICATION_ATTRIBUTES
         expectedUid = uid
@@ -283,7 +286,8 @@ class DataSourceAssembler {
             categoryId = categoryId,
             eventFlags = eventFlags,
             positiveActionLabel = attributes[AncsConstants.ATTR_POSITIVE_ACTION_LABEL],
-            negativeActionLabel = attributes[AncsConstants.ATTR_NEGATIVE_ACTION_LABEL]
+            negativeActionLabel = attributes[AncsConstants.ATTR_NEGATIVE_ACTION_LABEL],
+            isUpdate = isUpdate
         )
     }
 

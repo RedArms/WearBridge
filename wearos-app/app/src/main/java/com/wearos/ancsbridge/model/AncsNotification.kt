@@ -14,5 +14,7 @@ data class AncsNotification(
     val categoryId: Int,
     val eventFlags: Int,
     val positiveActionLabel: String?,
-    val negativeActionLabel: String?
+    val negativeActionLabel: String?,
+    /** Fetched for a MODIFIED event: an update of a notification already shown. */
+    val isUpdate: Boolean = false
 )

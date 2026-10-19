@@ -133,6 +133,8 @@ class AncsService : Service() {
     /** The ringing iPhone Clock alarm, when ANCS delivers it (not all iPhones do). */
     @Volatile private var clockAlarm: ClockAlarm? = null
     private val reconnectionGracePeriodMs = 60_000L
+    /** An ANCS session (Notification Source subscribed) is running. */
+    private var sessionActive = false
 
     // Serial queue for Control Point requests (one Data Source response at a time)
     private val attributeRequestQueue = Channel<ControlPointRequest>(Channel.BUFFERED)
@@ -196,7 +198,9 @@ class AncsService : Service() {
 
         // A rejected Control Point request gets no Data Source response: don't wait 2 s for it.
         scope.launch {
-            connectionManager.controlPointWriteFailures.collect {
+            connectionManager.controlPointWriteFailures.collect { command ->
+                // A failed action (answer, decline, stop alarm) has nothing to do with the fetch in flight.
+                if (command == AncsConstants.COMMAND_PERFORM_NOTIFICATION_ACTION) return@collect
                 dataSourceAssembler.reset()
                 pendingResponse?.complete(Unit)
             }
@@ -213,13 +217,20 @@ class AncsService : Service() {
                     is ConnectionState.Scanning -> "Scanning..."
                     is ConnectionState.Connecting -> "Connecting to ${state.deviceName ?: "iPhone"}..."
                     is ConnectionState.Bonding -> "Pairing with ${state.deviceName ?: "iPhone"}..."
-                    is ConnectionState.Connected -> {
-                        subscriptionTime = System.currentTimeMillis()
-                        removedUids.clear() // UIDs are only unique within an ANCS session
-                        "Connected to ${state.deviceName ?: "iPhone"}"
-                    }
+                    is ConnectionState.Connected -> "Connected to ${state.deviceName ?: "iPhone"}"
                     is ConnectionState.Disconnected -> "Disconnected"
                     is ConnectionState.Error -> "Error: ${state.message}"
+                }
+                // Connected is emitted again once the real iPhone name is known: same session.
+                val connected = state is ConnectionState.Connected
+                if (connected && !sessionActive) {
+                    sessionActive = true
+                    subscriptionTime = System.currentTimeMillis()
+                    removedUids.clear() // UIDs are only unique within an ANCS session
+                    clockAlarm = null
+                } else if (!connected && sessionActive) {
+                    sessionActive = false
+                    endAncsSession()
                 }
                 // The link dropped while a call was ringing: its REMOVED will never come.
                 if (state !is ConnectionState.Connected && state !is ConnectionState.Connecting &&
@@ -341,6 +352,16 @@ class AncsService : Service() {
         }
     }
 
+    /** The ANCS session is gone: what was queued for it would fetch the next session's UIDs. */
+    private fun endAncsSession() {
+        var dropped = 0
+        while (attributeRequestQueue.tryReceive().isSuccess) dropped++
+        if (dropped > 0) Log.i(TAG, "Link lost: dropped $dropped queued attribute requests")
+        dataSourceAssembler.reset()
+        pendingResponse?.complete(Unit)
+        clockAlarm = null
+    }
+
     /** Dismisses the call screen, Telecom call and call notification. */
     private fun endActiveCall() {
         activeCallUid = -1
@@ -402,8 +423,9 @@ class AncsService : Service() {
                     return
                 }
 
-                if (event.isIncomingCall) {
+                if (event.isIncomingCall && event.isAdded) {
                     // IMMEDIATELY show call screen — don't wait for attribute fetch.
+                    // Only for a new call: a MODIFIED of another call (call waiting) must not take over.
                     // The NS payload already tells us it's a call. We'll update
                     // the caller name later if attributes arrive in time.
                     Log.i(TAG, "Incoming call NS event (cat=1) uid=${event.notificationUid} — showing call screen NOW")
@@ -551,7 +573,8 @@ class AncsService : Service() {
             uid = event.notificationUid,
             requestedAttributes = request.requestedAttributes,
             category = event.categoryId,
-            flags = event.eventFlags
+            flags = event.eventFlags,
+            isUpdate = event.isModified
         )
 
         // Write the Control Point request
@@ -605,6 +628,12 @@ class AncsService : Service() {
             "flags=0x${notification.eventFlags.toString(16)} app=${notification.appIdentifier} " +
             "title=${notification.title} preExisting=$isPreExisting")
 
+        // Removed on the iPhone while its attributes were on the way.
+        if (notification.uid in removedUids) {
+            Log.d(TAG, "Dropping notification removed meanwhile uid=${notification.uid}")
+            return
+        }
+
         // Resolve app display name if not cached
         val appName = resolveAppName(notification.appIdentifier)
         val updatedNotification = notification.copy(appDisplayName = appName)
@@ -626,6 +655,12 @@ class AncsService : Service() {
         )
 
         if (isIncomingCall) {
+            // An update of a call that isn't on screen (call waiting, a call already
+            // dismissed) must not open the call screen again.
+            if (notification.isUpdate && activeCallUid != notification.uid) {
+                Log.d(TAG, "Ignoring update of call uid=${notification.uid} (not on screen)")
+                return
+            }
             Log.i(TAG, "Showing incoming call screen for ${notification.title}")
             showIncomingCall(updatedNotification)
             return
@@ -642,6 +677,11 @@ class AncsService : Service() {
             notification.uid, notification.appIdentifier,
             notification.positiveActionLabel, notification.negativeActionLabel
         )?.let { alarm ->
+            if (clockAlarm?.uid == alarm.uid) {
+                // An update of the alarm already handled (e.g. stopped or snoozed from the watch): don't ring again.
+                clockAlarm = alarm
+                return
+            }
             Log.i(TAG, "iPhone Clock alarm uid=${alarm.uid} " +
                 "(${alarm.positiveActionLabel} / ${alarm.negativeActionLabel})")
             clockAlarm = alarm
@@ -702,6 +742,8 @@ class AncsService : Service() {
             .setGroup("ancs_${notification.uid}")
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_ALL)
             .setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI)
+            // A MODIFIED event re-posts the same ID: update it without buzzing again.
+            .setOnlyAlertOnce(notification.isUpdate)
 
         // MessagingStyle for everything — Samsung One UI Watch only shows the body
         // in the heads-up overlay for MessagingStyle (gotcha 14).
@@ -720,8 +762,9 @@ class AncsService : Service() {
         if (notification.positiveActionLabel != null) {
             val positiveIntent = PendingIntent.getBroadcast(
                 this, notifId,
-                Intent(NotificationActionReceiver.ACTION_POSITIVE).apply {
-                    setPackage(packageName)
+                // Explicit: the receiver has no intent filter.
+                Intent(this, NotificationActionReceiver::class.java).apply {
+                    action = NotificationActionReceiver.ACTION_POSITIVE
                     putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_UID, notification.uid)
                 },
                 PendingIntent.FLAG_IMMUTABLE
@@ -732,8 +775,8 @@ class AncsService : Service() {
         if (notification.negativeActionLabel != null) {
             val negativeIntent = PendingIntent.getBroadcast(
                 this, notifId + 500_000,
-                Intent(NotificationActionReceiver.ACTION_NEGATIVE).apply {
-                    setPackage(packageName)
+                Intent(this, NotificationActionReceiver::class.java).apply {
+                    action = NotificationActionReceiver.ACTION_NEGATIVE
                     putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_UID, notification.uid)
                 },
                 PendingIntent.FLAG_IMMUTABLE
@@ -842,8 +885,8 @@ class AncsService : Service() {
         )
         val declinePendingIntent = PendingIntent.getBroadcast(
             this, 2,
-            Intent(NotificationActionReceiver.ACTION_NEGATIVE).apply {
-                setPackage(packageName)
+            Intent(this, NotificationActionReceiver::class.java).apply {
+                action = NotificationActionReceiver.ACTION_NEGATIVE
                 putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_UID, notification.uid)
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -877,6 +920,8 @@ class AncsService : Service() {
     /** Retries a GATT write that returns false while another operation is in flight. */
     private suspend fun retryGattWrite(write: () -> Boolean): Boolean {
         repeat(GATT_WRITE_ATTEMPTS) { attempt ->
+            // No point waiting out the retries once the link is gone.
+            if (connectionManager.connectionState.value !is ConnectionState.Connected) return false
             if (write()) return true
             if (attempt < GATT_WRITE_ATTEMPTS - 1) delay(GATT_RETRY_DELAY_MS)
         }

@@ -30,10 +30,14 @@
 - GATT callbacks run on the main thread (`connectGatt` with a main-looper `Handler`), like the coroutines sharing the connection state
 - Bluetooth turned back on → immediate reconnect (`ACTION_STATE_CHANGED`); a failed service discovery or ANCS CCCD write drops the link so the normal reconnect starts over; bond events for other devices are ignored
 - A link lost while a call rings dismisses the call screen (its REMOVED never comes)
+- A lost link ends the ANCS session: queued attribute requests are dropped (UIDs are only unique within a session), as are the removed-UID list and the tracked Clock alarm; Control Point retries stop once the link is gone
+- CCCD writes are serialized (one in flight, one retry scheduled at a time, up to 6 s); health writes yield while subscriptions are queued and for 5 s after a Service Changed
 
 ## Silent/Pre-existing Notification Handling
 
 - Pre-existing notifications (`EVENT_FLAG_PRE_EXISTING`) are skipped at NS event level — no GATT writes, no haptics
+- MODIFIED events update the notification with `setOnlyAlertOnce` (no second buzz); only ADDED opens the call screen, and an update of a call that isn't on screen is ignored (call waiting); attributes of a notification removed meanwhile are dropped
+- Notification action buttons use explicit intents (`NotificationActionReceiver` has no intent filter); a failed action write doesn't cancel the attribute fetch in flight
 - 60-second reconnection grace period skips all non-call NS events to avoid vibration storms
 - **Never use `setNotificationSilent()`** — it kills heads-up overlays on Wear OS
 

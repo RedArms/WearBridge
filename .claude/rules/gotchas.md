@@ -39,3 +39,5 @@
 19. **Data Layer needs identical apps**: the watch app and the phone relay only see each other's messages if they share the application ID (`com.wearos.ancsbridge`) and signing certificate. Build both from the same machine/keystore.
 
 20. **Samsung Health developer mode turns itself off**: after some Samsung Health updates, the relay fails with `ERR_ACCESS_CONTROL` until developer mode is switched on again (Samsung Health → About → tap version 10×).
+
+21. **Service Changed vs. ANCS notifications**: when the companion app (re)publishes its service, iOS sends Service Changed and the watch rediscovers services. Android can drop its local notification registrations for the indicated handle range, so `onServicesDiscovered` re-calls `setCharacteristicNotification` on the fresh Notification Source / Data Source objects (local only: no CCCD write, no buzz, no new session; gotcha 12 still applies).

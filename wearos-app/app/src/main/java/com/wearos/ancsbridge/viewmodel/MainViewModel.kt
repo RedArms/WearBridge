@@ -220,7 +220,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val context = getApplication<Application>()
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = manager.adapter ?: return false
-        return adapter.bondedDevices.any { device ->
+        // Drawn behind the permission dialog on first launch: no Bluetooth access yet.
+        val bonded = try {
+            adapter.bondedDevices ?: return false
+        } catch (e: SecurityException) {
+            return false
+        }
+        return bonded.any { device ->
             val name = device.name ?: ""
             name.contains("iPhone", ignoreCase = true) ||
                 name.contains("AncsBrid", ignoreCase = true) ||
