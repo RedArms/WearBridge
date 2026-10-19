@@ -20,7 +20,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.work.WorkManager
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
@@ -111,14 +113,16 @@ class RelayActivity : ComponentActivity() {
                 }
                 isEnabled = false
                 text = "Waiting for the running sync…"
+                val app = applicationContext
                 lifecycleScope.launch {
-                    // Finish even if the screen goes away meanwhile.
-                    withContext(NonCancellable) { mailbox.reset(url) }
+                    // Finish even if the screen goes away meanwhile (the QR code follows pairingGeneration).
+                    withContext(NonCancellable) {
+                        mailbox.reset(url)
+                        RelayWorker.syncNow(app)
+                    }
                     isEnabled = true
                     text = "Use this server (new pairing)"
-                    showQr()
                     Toast.makeText(this@RelayActivity, "New pairing: scan the code again on the iPhone", Toast.LENGTH_LONG).show()
-                    RelayWorker.syncNow(this@RelayActivity)
                 }
             }
         }
@@ -141,7 +145,12 @@ class RelayActivity : ComponentActivity() {
         }
         setContentView(ScrollView(this).apply { addView(content) })
 
-        showQr()
+        // Draws the QR code now and after every re-pairing, even one started before a screen rebuild.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                RelayMailbox.pairingGeneration.collect { showQr() }
+            }
+        }
         RelayWorker.schedule(this)
         WorkManager.getInstance(this)
             .getWorkInfosForUniqueWorkLiveData(RelayWorker.ONE_TIME_WORK_NAME)

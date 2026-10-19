@@ -168,7 +168,10 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             backfilled = backfillFrom != null
 
             // Watch path, when it's around (it also tells the watch to leave heart rate to us).
-            val forWatch = state.watchSentLog.filterUnsent(records.filter { it.endEpochSec >= windowStart }, nowSec)
+            val forWatch = state.watchSentLog.filterUnsent(
+                if (backfillFrom != null && backfillFrom < windowStart) records.filter { it.endEpochSec >= windowStart } else records,
+                nowSec
+            )
             val watch = try {
                 RelaySender.send(applicationContext, forWatch)
                 state.watchSentLog.markSent(forWatch, nowSec)

@@ -7,6 +7,7 @@ import com.wearos.ancsbridge.health.HealthRecord
 import com.wearos.ancsbridge.health.MailboxCodec
 import com.wearos.ancsbridge.relay.core.MailboxOutbox
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -37,6 +38,9 @@ class RelayMailbox(context: Context) {
         const val LISTENING_ACK_SEC = 3 * 24 * 3600L
         /** ...or the pairing is this new (time to scan the code). */
         const val NEW_PAIRING_SEC = 2 * 24 * 3600L
+
+        /** Bumped by every re-pairing, so any screen showing the QR code redraws it. */
+        val pairingGeneration = MutableStateFlow(0)
 
         /** One outbox per process, so the worker and the activity share its lock. */
         @Volatile private var sharedOutbox: MailboxOutbox? = null
@@ -89,11 +93,13 @@ class RelayMailbox(context: Context) {
      */
     suspend fun reset(server: String = pairing.server) = RelayWorker.runLock.withLock {
         withContext(Dispatchers.IO) {
+            // What the old pairing queued will be gone: have it sent again under the new one.
+            // First, so a crash halfway can't lose it (a backfill under the old pairing is harmless).
+            RelayState(app).restartMailboxDelivery(System.currentTimeMillis() / 1000)
             synchronized(this@RelayMailbox) { save(MailboxCodec.newPairing(server)) }
             outbox.clear()
-            // What the old pairing had queued is gone: send it again under the new one.
-            RelayState(app).restartMailboxDelivery(System.currentTimeMillis() / 1000)
         }
+        pairingGeneration.value++
     }
 
     private fun save(pairing: MailboxCodec.Pairing) {

@@ -189,8 +189,11 @@ class PeripheralManager: NSObject, ObservableObject {
             logger.error("Wake alarm: Bluetooth or the companion service isn't ready")
             return false
         }
-        let data = Data([wakeAlarmState])
+        let requested = wakeAlarmState
         for _ in 0..<5 {
+            // A newer call (e.g. "stopped" while this "ringing" waited) has taken over.
+            guard wakeAlarmState == requested else { return true }
+            let data = Data([requested])
             // False only while the transmit queue is full; the latest value is then resent when there's room
             // (and replaces a held "ringing" replay, so a stale one can't restart the watch alarm).
             if sendUpdate(data, for: characteristic) {

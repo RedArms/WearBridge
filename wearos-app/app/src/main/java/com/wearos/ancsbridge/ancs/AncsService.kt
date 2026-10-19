@@ -948,6 +948,7 @@ class AncsService : Service() {
             AncsConstants.WAKE_ALARM_STOPPED -> {
                 Log.i(TAG, "Companion: iPhone wake-up alarm stopped")
                 WakeAlarm.stop(this)
+                clockAlarmHandledAtMs = System.currentTimeMillis()
             }
         }
     }
