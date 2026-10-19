@@ -7,6 +7,9 @@
 
     <!-- Internet relay: posts encrypted batches to the mailbox the iPhone app polls -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The phone stays at home untouched: without this, App Standby and One UI's
+         "sleeping apps" cut the 15-minute sync down to a few runs a day -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
         <package android:name="com.sec.android.app.shealth" />

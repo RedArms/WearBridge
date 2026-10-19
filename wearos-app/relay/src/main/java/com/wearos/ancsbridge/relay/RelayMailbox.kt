@@ -7,6 +7,7 @@ import com.wearos.ancsbridge.health.HealthRecord
 import com.wearos.ancsbridge.health.MailboxCodec
 import com.wearos.ancsbridge.relay.core.MailboxOutbox
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -29,12 +30,26 @@ class RelayMailbox(context: Context) {
         private const val KEY_TOPIC = "topic"
         private const val KEY_KEY = "key"
         private const val KEY_LAST_POST = "last_post"
+        private const val KEY_PAIRED_AT = "paired_at"
         private const val TIMEOUT_MS = 15_000
+
+        /** The iPhone counts as listening if it acknowledged something this recently... */
+        const val LISTENING_ACK_SEC = 3 * 24 * 3600L
+        /** ...or the pairing is this new (time to scan the code). */
+        const val NEW_PAIRING_SEC = 2 * 24 * 3600L
+
+        /** One outbox per process, so the worker and the activity share its lock. */
+        @Volatile private var sharedOutbox: MailboxOutbox? = null
+
+        private fun outbox(app: Context): MailboxOutbox =
+            sharedOutbox ?: synchronized(this) {
+                sharedOutbox ?: MailboxOutbox(File(app.filesDir, "mailbox")).also { sharedOutbox = it }
+            }
     }
 
     private val app = context.applicationContext
     private val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    val outbox = MailboxOutbox(File(app.filesDir, "mailbox"))
+    val outbox = outbox(app)
 
     var enabled: Boolean
         get() = prefs.getBoolean(KEY_ENABLED, true)
@@ -56,11 +71,27 @@ class RelayMailbox(context: Context) {
 
     val lastPostEpochSec: Long? get() = prefs.getLong(KEY_LAST_POST, -1L).takeIf { it >= 0 }
 
-    /** A new topic and key: the iPhone has to scan the new QR code. */
-    @Synchronized
-    fun reset(server: String = pairing.server) {
-        save(MailboxCodec.newPairing(server))
-        outbox.clear()
+    /**
+     * Whether the iPhone reads the mailbox: it acknowledged something lately, or the
+     * pairing is new. Otherwise the relay only posts now and then ([MailboxOutbox.due]).
+     */
+    fun isListening(nowSec: Long): Boolean {
+        val lastAck = outbox.lastAckSec
+        if (lastAck != null && nowSec - lastAck < LISTENING_ACK_SEC) return true
+        val pairedAt = prefs.getLong(KEY_PAIRED_AT, -1L).takeIf { it >= 0 }
+            ?: nowSec.also { prefs.edit().putLong(KEY_PAIRED_AT, it).apply() } // pairing from an older version
+        return nowSec - pairedAt < NEW_PAIRING_SEC
+    }
+
+    /**
+     * A new topic and key: the iPhone has to scan the new QR code. Waits for a running
+     * sync, so nothing sealed with the old key is posted to the new topic.
+     */
+    suspend fun reset(server: String = pairing.server) = RelayWorker.runLock.withLock {
+        withContext(Dispatchers.IO) {
+            synchronized(this@RelayMailbox) { save(MailboxCodec.newPairing(server)) }
+            outbox.clear()
+        }
     }
 
     private fun save(pairing: MailboxCodec.Pairing) {
@@ -68,7 +99,8 @@ class RelayMailbox(context: Context) {
             .putString(KEY_SERVER, pairing.server)
             .putString(KEY_TOPIC, pairing.topic)
             .putString(KEY_KEY, Base64.encodeToString(pairing.key, Base64.NO_WRAP))
-            .apply()
+            .putLong(KEY_PAIRED_AT, System.currentTimeMillis() / 1000)
+            .commit()
     }
 
     /** Queues records for the iPhone (durably; sending happens in [sync]). */
@@ -84,10 +116,11 @@ class RelayMailbox(context: Context) {
         if (!enabled) return@withContext "Internet relay off"
         val pairing = pairing
         try {
-            readAcks(pairing)
+            readAcks(pairing, nowSec)
             outbox.pack(pairing.key, nowSec)
+            val listening = isListening(nowSec)
             var posted = 0
-            for (entry in outbox.due(nowSec)) {
+            for (entry in outbox.due(nowSec, listening)) {
                 if (!post(pairing.server, pairing.topic, entry.text)) break
                 outbox.markPosted(entry.seq, nowSec)
                 posted++
@@ -95,15 +128,20 @@ class RelayMailbox(context: Context) {
             if (posted > 0) prefs.edit().putLong(KEY_LAST_POST, nowSec).apply()
             val dropped = outbox.dropExpired(nowSec)
             if (dropped > 0) Log.w(TAG, "Gave up on $dropped messages the iPhone never confirmed")
-            "Internet relay: $posted posted, ${outbox.waitingForAck()} waiting for the iPhone, " +
-                "${outbox.pendingCount()} records to group"
+            val waiting = outbox.waitingForAck()
+            val iphone = when {
+                !listening -> " The iPhone hasn't confirmed anything for days (scan the code in WearBridge on the iPhone): posting one message every 11 h."
+                outbox.postsToday(nowSec) >= MailboxOutbox.MAX_POSTS_PER_DAY -> " Daily mailbox limit reached; the rest goes out later."
+                else -> ""
+            }
+            "Internet relay: $posted posted, $waiting waiting for the iPhone, ${outbox.pendingCount()} records to group.$iphone"
         } catch (e: Exception) {
             Log.w(TAG, "Mailbox sync failed", e)
             "Internet relay: no connection (${e.message ?: e.javaClass.simpleName}); will retry"
         }
     }
 
-    private fun readAcks(pairing: MailboxCodec.Pairing) {
+    private fun readAcks(pairing: MailboxCodec.Pairing, nowSec: Long) {
         val ackTopic = pairing.topic + MailboxCodec.ACK_TOPIC_SUFFIX
         val since = URLEncoder.encode(outbox.lastAckId ?: "all", "UTF-8")
         val connection = URL("${pairing.server}/$ackTopic/json?poll=1&since=$since").openConnection() as HttpURLConnection
@@ -112,6 +150,7 @@ class RelayMailbox(context: Context) {
             connection.readTimeout = TIMEOUT_MS
             if (connection.responseCode != 200) throw IllegalStateException("ack poll: HTTP ${connection.responseCode}")
             var lastId: String? = null
+            var heard = false
             val acked = mutableListOf<Long>()
             connection.inputStream.bufferedReader().useLines { lines ->
                 for (line in lines) {
@@ -120,10 +159,10 @@ class RelayMailbox(context: Context) {
                     if (json.optString("event") != "message") continue
                     json.optString("id").takeIf { it.isNotEmpty() }?.let { lastId = it }
                     val ack = MailboxCodec.open(pairing.key, json.optString("message")) as? MailboxCodec.Message.Ack
-                    ack?.let { acked += it.seqs }
+                    ack?.let { acked += it.seqs; heard = true }
                 }
             }
-            outbox.acknowledge(acked)
+            if (heard) outbox.acknowledge(acked, nowSec)
             lastId?.let { outbox.lastAckId = it }
         } finally {
             connection.disconnect()

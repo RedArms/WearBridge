@@ -15,16 +15,25 @@ import java.util.Properties
  * - sealed **messages** waiting for the iPhone's ack. Unacknowledged ones are
  *   posted again every [REPOST_AFTER_SEC] (the mailbox only keeps messages for
  *   12 h), and given up after [GIVE_UP_AFTER_SEC].
+ *
+ * Posting is capped at [MAX_POSTS_PER_DAY]. When the iPhone hasn't acknowledged
+ * anything lately (app deleted, never paired), only one message goes out per
+ * [REPOST_AFTER_SEC]: enough for a returning iPhone to answer, after which
+ * everything still queued follows.
  */
 class MailboxOutbox(private val dir: File) {
 
     companion object {
         /** Heart-rate-only records wait this long to be grouped; other types go out at once. */
         const val HEART_RATE_DELAY_SEC = 60 * 60L
-        const val REPOST_AFTER_SEC = 6 * 3600L
+        /** Just under the 12 h the mailbox keeps a message. */
+        const val REPOST_AFTER_SEC = 11 * 3600L
         const val GIVE_UP_AFTER_SEC = 7 * 24 * 3600L
         /** Posts per run at most (ntfy.sh: bursts of 60 requests). */
         const val MAX_POSTS_PER_RUN = 30
+        /** Posts per rolling 24 h at most (ntfy.sh allows 250 per visitor, the iPhone's acks count too). */
+        const val MAX_POSTS_PER_DAY = 150
+        private const val DAY_SEC = 24 * 3600L
 
         private const val PENDING_FILE = "mailbox_pending.bin"
         private const val MESSAGES_FILE = "mailbox_messages.txt"
@@ -32,6 +41,8 @@ class MailboxOutbox(private val dir: File) {
         private const val KEY_NEXT_SEQ = "next_seq"
         private const val KEY_PENDING_SINCE = "pending_since"
         private const val KEY_LAST_ACK_ID = "last_ack_id"
+        private const val KEY_LAST_ACK_SEC = "last_ack_sec"
+        private const val KEY_POST_TIMES = "post_times"
     }
 
     /** A sealed message. [lastPostedSec] is 0 until it has been posted. */
@@ -70,34 +81,68 @@ class MailboxOutbox(private val dir: File) {
                 nextSeq = (nextSeq + 1) and 0xFFFF_FFFFL
             }
         }
+        // Sequence numbers first: after a crash between the two writes, numbers are
+        // skipped rather than reused (an ack for one message must not drop another).
+        updateState { it.setProperty(KEY_NEXT_SEQ, nextSeq.toString()) }
         saveMessages(loadMessages() + created)
-        updateState {
-            it.setProperty(KEY_NEXT_SEQ, nextSeq.toString())
-            it.remove(KEY_PENDING_SINCE)
-        }
+        updateState { it.remove(KEY_PENDING_SINCE) }
         savePending(emptyList())
         return created.size
     }
 
-    /** Messages to post now: never posted, or not acknowledged since [REPOST_AFTER_SEC]. */
+    /**
+     * Messages to post now: never-posted ones first (new data), then those not
+     * acknowledged for [REPOST_AFTER_SEC], within the daily cap. While the iPhone
+     * isn't [listening], one message per [REPOST_AFTER_SEC] at most.
+     */
     @Synchronized
-    fun due(nowSec: Long): List<Entry> =
-        loadMessages()
-            .filter { it.lastPostedSec == 0L || nowSec - it.lastPostedSec >= REPOST_AFTER_SEC }
-            .take(MAX_POSTS_PER_RUN)
+    fun due(nowSec: Long, listening: Boolean = true): List<Entry> {
+        val posts = recentPostTimes(nowSec)
+        val budget = MAX_POSTS_PER_DAY - posts.size
+        val limit = when {
+            budget <= 0 -> 0
+            listening -> minOf(MAX_POSTS_PER_RUN, budget)
+            posts.any { nowSec - it < REPOST_AFTER_SEC } -> 0
+            else -> 1
+        }
+        if (limit == 0) return emptyList()
+        val messages = loadMessages()
+        val fresh = messages.filter { it.lastPostedSec == 0L }
+        val reposts = messages
+            .filter { it.lastPostedSec != 0L && nowSec - it.lastPostedSec >= REPOST_AFTER_SEC }
+            .sortedBy { it.lastPostedSec }
+        return (fresh + reposts).take(limit)
+    }
 
     @Synchronized
     fun markPosted(seq: Long, nowSec: Long) {
         saveMessages(loadMessages().map { if (it.seq == seq) it.copy(lastPostedSec = nowSec) else it })
+        val posts = recentPostTimes(nowSec) + nowSec
+        updateState { it.setProperty(KEY_POST_TIMES, posts.joinToString(",")) }
     }
 
-    /** The iPhone confirmed these messages. */
+    /** Posts in the last 24 h. */
     @Synchronized
-    fun acknowledge(seqs: Collection<Long>) {
+    fun postsToday(nowSec: Long): Int = recentPostTimes(nowSec).size
+
+    private fun recentPostTimes(nowSec: Long): List<Long> =
+        loadState().getProperty(KEY_POST_TIMES).orEmpty()
+            .split(',')
+            .mapNotNull { it.toLongOrNull() }
+            .filter { nowSec - it in 0 until DAY_SEC }
+
+    /** The iPhone confirmed these messages (an empty list still shows it's listening). */
+    @Synchronized
+    fun acknowledge(seqs: Collection<Long>, nowSec: Long) {
+        updateState { it.setProperty(KEY_LAST_ACK_SEC, nowSec.toString()) }
         if (seqs.isEmpty()) return
         val acked = seqs.toSet()
         saveMessages(loadMessages().filter { it.seq !in acked })
     }
+
+    /** When an ack from the iPhone was last read, if ever. */
+    val lastAckSec: Long?
+        @Synchronized get() = loadState().getProperty(KEY_LAST_ACK_SEC)?.toLongOrNull()
 
     /** Drops messages the iPhone never confirmed within [GIVE_UP_AFTER_SEC]. Returns how many. */
     @Synchronized
@@ -118,14 +163,19 @@ class MailboxOutbox(private val dir: File) {
             if (value == null) it.remove(KEY_LAST_ACK_ID) else it.setProperty(KEY_LAST_ACK_ID, value)
         }
 
-    /** Forgets everything, e.g. after re-pairing with a new key. */
+    /** Forgets everything but the sequence numbers and the daily post count, e.g. after re-pairing with a new key. */
     @Synchronized
     fun clear() {
         pendingFile.delete()
         messagesFile.delete()
-        val next = loadState().getProperty(KEY_NEXT_SEQ)
+        val state = loadState()
+        val next = state.getProperty(KEY_NEXT_SEQ)
+        val posts = state.getProperty(KEY_POST_TIMES)
         stateFile.delete()
-        if (next != null) updateState { it.setProperty(KEY_NEXT_SEQ, next) }
+        updateState {
+            if (next != null) it.setProperty(KEY_NEXT_SEQ, next)
+            if (posts != null) it.setProperty(KEY_POST_TIMES, posts)
+        }
     }
 
     // --- Storage ---

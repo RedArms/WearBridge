@@ -107,6 +107,27 @@ class RelayCoreTest {
     }
 
     @Test
+    fun `sync window reaches back to the newest record after the watch was away`() {
+        val now = 10_000_000L
+        val lastSuccess = now - 900
+        // Watch synced 5 min ago: the usual overlap.
+        assertEquals(lastSuccess - SyncWindow.OVERLAP_SEC, SyncWindow.startEpochSec(now, lastSuccess, now - 300))
+        // Nothing new for 60 h: read from just before the last record, which the watch fills in when back.
+        val departed = now - 60 * 3600
+        assertEquals(departed - SyncWindow.NEWEST_RECORD_MARGIN_SEC, SyncWindow.startEpochSec(now, lastSuccess, departed))
+        // ...but not further back than the late-sync limit.
+        assertEquals(now - SyncWindow.MAX_LATE_SYNC_SEC, SyncWindow.startEpochSec(now, lastSuccess, now - 40 * 24 * 3600))
+        // An old last success still wins (the relay itself didn't run).
+        assertEquals(now - 20 * 24 * 3600 - SyncWindow.OVERLAP_SEC,
+            SyncWindow.startEpochSec(now, now - 20 * 24 * 3600, now - 40 * 24 * 3600))
+    }
+
+    @Test
+    fun `sent log outlives the longest read window`() {
+        assertTrue(SentLog.DEFAULT_TTL_SEC > SyncWindow.MAX_LATE_SYNC_SEC + SyncWindow.OVERLAP_SEC)
+    }
+
+    @Test
     fun `sent log skips recent records and expires them`() {
         val log = SentLog(File(dir, "sent.txt"), ttlSec = 100)
         val a = HealthRecord(HealthProtocol.TYPE_HEART_RATE, 1, 1, 60.0)

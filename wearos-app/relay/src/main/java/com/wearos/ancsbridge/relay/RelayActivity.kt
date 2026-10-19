@@ -1,10 +1,16 @@
 package com.wearos.ancsbridge.relay
 
+import android.annotation.SuppressLint
+import android.app.usage.UsageStatsManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
@@ -30,6 +36,8 @@ import kotlinx.coroutines.launch
 class RelayActivity : ComponentActivity() {
 
     private lateinit var status: TextView
+    private lateinit var background: TextView
+    private lateinit var allowBackground: Button
     private lateinit var qr: ImageView
     private lateinit var server: EditText
     private lateinit var reader: SamsungHealthReader
@@ -59,6 +67,11 @@ class RelayActivity : ComponentActivity() {
             }
         }
         status = TextView(this)
+        background = TextView(this).apply { setPadding(0, padding, 0, 0) }
+        allowBackground = Button(this).apply {
+            text = "Let the relay run in the background"
+            setOnClickListener { requestBackgroundRuns() }
+        }
 
         val internetTitle = TextView(this).apply {
             text = "\nInternet relay to the iPhone"
@@ -94,9 +107,11 @@ class RelayActivity : ComponentActivity() {
                     Toast.makeText(this@RelayActivity, "Use an https:// address", Toast.LENGTH_LONG).show()
                     return@setOnClickListener
                 }
-                mailbox.reset(url)
-                showQr()
-                Toast.makeText(this@RelayActivity, "New pairing: scan the code again on the iPhone", Toast.LENGTH_LONG).show()
+                lifecycleScope.launch {
+                    mailbox.reset(url)
+                    showQr()
+                    Toast.makeText(this@RelayActivity, "New pairing: scan the code again on the iPhone", Toast.LENGTH_LONG).show()
+                }
             }
         }
 
@@ -107,6 +122,8 @@ class RelayActivity : ComponentActivity() {
             addView(grant)
             addView(syncNow)
             addView(status)
+            addView(background)
+            addView(allowBackground)
             addView(internetTitle)
             addView(internetIntro)
             addView(qr)
@@ -126,6 +143,40 @@ class RelayActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
+        refreshBackgroundStatus()
+    }
+
+    /**
+     * The phone sits at home untouched, so Android files the relay under rarely used
+     * apps and One UI may put it to sleep: the 15-minute sync then runs a few times a day.
+     */
+    private fun refreshBackgroundStatus() {
+        val unrestricted = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        val bucket = getSystemService(UsageStatsManager::class.java).appStandbyBucket
+        val bucketText = when {
+            bucket <= UsageStatsManager.STANDBY_BUCKET_ACTIVE -> "active"
+            bucket <= UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "working set"
+            bucket <= UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "frequent"
+            bucket <= UsageStatsManager.STANDBY_BUCKET_RARE -> "rare (syncs a few times a day)"
+            else -> "restricted (syncs about once a day)"
+        }
+        background.text = if (unrestricted) {
+            "Background: unrestricted ✓ (standby: $bucketText).\nAlso keep WearBridge Relay out of One UI's sleeping apps: " +
+                "Settings → Battery → Background usage limits → Never sleeping apps."
+        } else {
+            "Background: battery optimisation is on (standby: $bucketText), so Android may delay syncs by hours. " +
+                "Tap below, then add WearBridge Relay to Settings → Battery → Background usage limits → Never sleeping apps."
+        }
+        allowBackground.visibility = if (unrestricted) android.view.View.GONE else android.view.View.VISIBLE
+    }
+
+    @SuppressLint("BatteryLife") // personal relay app: running unattended is the point
+    private fun requestBackgroundRuns() {
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
     }
 
     private fun showQr() {

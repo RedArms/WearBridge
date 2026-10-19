@@ -63,9 +63,71 @@ class MailboxOutboxTest {
         outbox.markPosted(0, t0)
         assertTrue(outbox.due(t0 + 60).isEmpty())
         assertEquals(1, outbox.due(t0 + MailboxOutbox.REPOST_AFTER_SEC).size)
-        outbox.acknowledge(listOf(0L, 42L))
+        outbox.acknowledge(listOf(0L, 42L), t0 + 100)
         assertTrue(outbox.due(t0 + MailboxOutbox.REPOST_AFTER_SEC).isEmpty())
         assertEquals(0, outbox.waitingForAck())
+    }
+
+    @Test
+    fun `new messages go out before reposts`() {
+        val outbox = MailboxOutbox(dir)
+        outbox.add(listOf(sleep), t0)
+        outbox.pack(key, t0)
+        outbox.markPosted(0, t0)
+        outbox.add(listOf(sleep.copy(startEpochSec = t0 + 10)), t0 + 1)
+        outbox.pack(key, t0 + 1)
+        assertEquals(listOf(1L, 0L), outbox.due(t0 + MailboxOutbox.REPOST_AFTER_SEC).map { it.seq })
+    }
+
+    @Test
+    fun `posts stay under the daily limit`() {
+        val outbox = MailboxOutbox(dir)
+        outbox.add((0 until 170 * 200).map(::hr), t0)
+        assertEquals(200, outbox.pack(key, t0))
+        var now = t0
+        var posted = 0
+        while (true) {
+            val due = outbox.due(now)
+            if (due.isEmpty()) break
+            assertTrue(due.size <= MailboxOutbox.MAX_POSTS_PER_RUN)
+            due.forEach { outbox.markPosted(it.seq, now); posted++ }
+            now += 900
+        }
+        assertEquals(MailboxOutbox.MAX_POSTS_PER_DAY, posted)
+        assertEquals(MailboxOutbox.MAX_POSTS_PER_DAY, outbox.postsToday(now))
+        assertTrue(outbox.due(t0 + 24 * 3600).isNotEmpty()) // a day later the budget is back
+    }
+
+    @Test
+    fun `without an iPhone listening, one message per repost interval`() {
+        val outbox = MailboxOutbox(dir)
+        outbox.add((0 until 500).map(::hr), t0)
+        outbox.pack(key, t0)
+        val first = outbox.due(t0, listening = false)
+        assertEquals(listOf(0L), first.map { it.seq })
+        outbox.markPosted(0, t0)
+        assertTrue(outbox.due(t0 + 3600, listening = false).isEmpty())
+        assertEquals(listOf(1L), outbox.due(t0 + MailboxOutbox.REPOST_AFTER_SEC, listening = false).map { it.seq })
+        // The iPhone answers: everything queued follows.
+        assertNull(outbox.lastAckSec)
+        outbox.acknowledge(listOf(0L), t0 + 3600)
+        assertEquals(t0 + 3600, outbox.lastAckSec)
+        assertEquals(listOf(1L, 2L), outbox.due(t0 + 3600, listening = true).map { it.seq })
+    }
+
+    @Test
+    fun `clearing keeps sequence numbers and the daily post count`() {
+        val outbox = MailboxOutbox(dir)
+        outbox.add(listOf(sleep), t0)
+        outbox.pack(key, t0)
+        outbox.markPosted(0, t0)
+        outbox.acknowledge(emptyList(), t0)
+        outbox.clear()
+        assertEquals(1, outbox.postsToday(t0 + 60))
+        assertNull(outbox.lastAckSec)
+        outbox.add(listOf(sleep), t0)
+        outbox.pack(key, t0)
+        assertEquals(listOf(1L), outbox.due(t0).map { it.seq })
     }
 
     @Test
