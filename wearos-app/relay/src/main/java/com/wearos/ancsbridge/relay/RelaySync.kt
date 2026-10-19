@@ -31,13 +31,34 @@ class RelayState(context: Context) {
     /** Records already sent to the watch. */
     val watchSentLog = SentLog(File(filesDir, "relay_sent.txt"))
 
+    private val mailboxSentFile = File(filesDir, "relay_mailbox_sent.txt")
+
     /** Records already queued for the internet mailbox (separate: either path can fail alone). */
-    val mailboxSentLog: SentLog = File(filesDir, "relay_mailbox_sent.txt").let { file ->
+    val mailboxSentLog: SentLog by lazy {
         // First run after the update: start from what the watch path already sent.
         val watchFile = File(filesDir, "relay_sent.txt")
-        if (!file.exists() && watchFile.exists()) watchFile.copyTo(file)
-        SentLog(file)
+        if (!mailboxSentFile.exists() && watchFile.exists()) {
+            try {
+                watchFile.copyTo(mailboxSentFile)
+            } catch (e: java.io.IOException) {
+                // Another RelayState did it at the same moment.
+            }
+        }
+        SentLog(mailboxSentFile)
     }
+
+    /**
+     * After a re-pairing, what the old pairing had queued is gone: forget what the mailbox
+     * path sent and have the next run read [SyncWindow.FIRST_RUN_LOOKBACK_SEC] back for it.
+     */
+    fun restartMailboxDelivery(nowEpochSec: Long) {
+        mailboxSentFile.writeText("") // empty, not deleted: deleting would copy the watch log back
+        prefs.edit().putLong(KEY_MAILBOX_BACKFILL_FROM, nowEpochSec - SyncWindow.FIRST_RUN_LOOKBACK_SEC).commit()
+    }
+
+    /** Start of a one-off mailbox backfill still to do (see [restartMailboxDelivery]). */
+    val mailboxBackfillFromEpochSec: Long?
+        get() = prefs.getLong(KEY_MAILBOX_BACKFILL_FROM, -1L).takeIf { it >= 0L }
 
     val lastSuccessEpochSec: Long?
         get() = prefs.getLong(KEY_LAST_SUCCESS, -1L).takeIf { it >= 0L }
@@ -54,8 +75,9 @@ class RelayState(context: Context) {
     val lastMessage: String?
         get() = prefs.getString(KEY_LAST_MESSAGE, null)
 
-    fun recordSuccess(nowEpochSec: Long, summary: String) {
+    fun recordSuccess(nowEpochSec: Long, summary: String, backfillDone: Boolean = false) {
         prefs.edit()
+            .apply { if (backfillDone) remove(KEY_MAILBOX_BACKFILL_FROM) }
             .putLong(KEY_LAST_SUCCESS, nowEpochSec)
             .putString(KEY_LAST_MESSAGE, "Last sync ${Instant.ofEpochSecond(nowEpochSec)}: $summary")
             .apply()
@@ -71,6 +93,7 @@ class RelayState(context: Context) {
         const val KEY_LAST_SUCCESS = "last_success"
         const val KEY_LAST_MESSAGE = "last_message"
         const val KEY_NEWEST_RECORD_END = "newest_record_end"
+        const val KEY_MAILBOX_BACKFILL_FROM = "mailbox_backfill_from"
     }
 }
 
@@ -129,10 +152,12 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
 
         var summary: String? = null
         var tookRecords = false
+        var backfilled = false
         val readError: Exception? = try {
-            val from = Instant.ofEpochSecond(
-                SyncWindow.startEpochSec(nowSec, state.lastSuccessEpochSec, state.newestRecordEndEpochSec)
-            )
+            val windowStart = SyncWindow.startEpochSec(nowSec, state.lastSuccessEpochSec, state.newestRecordEndEpochSec)
+            // After a re-pairing the mailbox path reads further back once; the watch path doesn't need it.
+            val backfillFrom = if (mailbox.enabled) state.mailboxBackfillFromEpochSec else null
+            val from = Instant.ofEpochSecond(minOf(windowStart, backfillFrom ?: windowStart))
             val records = SamsungHealthReader(applicationContext).read(from, now)
             state.noteRecords(records, nowSec)
 
@@ -140,9 +165,10 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             val forMailbox = if (mailbox.enabled) state.mailboxSentLog.filterUnsent(records, nowSec) else emptyList()
             mailbox.enqueue(forMailbox, nowSec)
             state.mailboxSentLog.markSent(forMailbox, nowSec)
+            backfilled = backfillFrom != null
 
             // Watch path, when it's around (it also tells the watch to leave heart rate to us).
-            val forWatch = state.watchSentLog.filterUnsent(records, nowSec)
+            val forWatch = state.watchSentLog.filterUnsent(records.filter { it.endEpochSec >= windowStart }, nowSec)
             val watch = try {
                 RelaySender.send(applicationContext, forWatch)
                 state.watchSentLog.markSent(forWatch, nowSec)
@@ -182,7 +208,7 @@ class RelayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                 state.recordFailure(nowSec, "the watch is not connected and the internet relay is off")
             }
             else -> {
-                state.recordSuccess(nowSec, "$summary $internet")
+                state.recordSuccess(nowSec, "$summary $internet", backfillDone = backfilled)
                 Log.i(TAG, "$summary $internet")
             }
         }

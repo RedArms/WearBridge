@@ -99,6 +99,8 @@ class AncsService : Service() {
         private const val HEALTH_SYNC_QUIET_MS = 3_000L
         // A call whose end we never heard of (link dropped) stops blocking health sync after this.
         private const val CALL_BLOCKS_HEALTH_SYNC_MS = 3 * 60_000L
+        /** Updates of a Clock alarm this soon after the watch stopped it are its stop/snooze echo. */
+        private const val CLOCK_ALARM_UPDATE_GRACE_MS = 2 * 60_000L
 
         /** Shared connection state observable by the ViewModel */
         private val _sharedConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
@@ -132,6 +134,8 @@ class AncsService : Service() {
     @Volatile private var callStartedMs = 0L
     /** The ringing iPhone Clock alarm, when ANCS delivers it (not all iPhones do). */
     @Volatile private var clockAlarm: ClockAlarm? = null
+    /** When the watch last stopped or snoozed [clockAlarm]. */
+    private var clockAlarmHandledAtMs = 0L
     private val reconnectionGracePeriodMs = 60_000L
     /** An ANCS session (Notification Source subscribed) is running. */
     private var sessionActive = false
@@ -300,6 +304,7 @@ class AncsService : Service() {
             }
             ACTION_STOP_WAKE_ALARM -> {
                 WakeAlarm.stop(this)
+                clockAlarmHandledAtMs = System.currentTimeMillis()
                 // Stop (or snooze) the iPhone alarm too, if ANCS gave us its actions.
                 clockAlarm?.let { alarm ->
                     val snooze = intent.getBooleanExtra(EXTRA_SNOOZE, false)
@@ -677,8 +682,12 @@ class AncsService : Service() {
             notification.uid, notification.appIdentifier,
             notification.positiveActionLabel, notification.negativeActionLabel
         )?.let { alarm ->
-            if (clockAlarm?.uid == alarm.uid) {
-                // An update of the alarm already handled (e.g. stopped or snoozed from the watch): don't ring again.
+            val sameAlarm = clockAlarm?.uid == alarm.uid
+            if (sameAlarm && (WakeAlarm.isRinging ||
+                    System.currentTimeMillis() - clockAlarmHandledAtMs < CLOCK_ALARM_UPDATE_GRACE_MS)
+            ) {
+                // An update of the alarm ringing, or just stopped / snoozed from the watch: don't ring again.
+                // A later update (iOS re-ringing it) does ring.
                 clockAlarm = alarm
                 return
             }

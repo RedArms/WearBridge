@@ -91,6 +91,8 @@ class RelayMailbox(context: Context) {
         withContext(Dispatchers.IO) {
             synchronized(this@RelayMailbox) { save(MailboxCodec.newPairing(server)) }
             outbox.clear()
+            // What the old pairing had queued is gone: send it again under the new one.
+            RelayState(app).restartMailboxDelivery(System.currentTimeMillis() / 1000)
         }
     }
 

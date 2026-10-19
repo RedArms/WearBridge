@@ -26,7 +26,9 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Setup screen for the relay: grant Samsung Health access, pair the iPhone with
@@ -107,10 +109,16 @@ class RelayActivity : ComponentActivity() {
                     Toast.makeText(this@RelayActivity, "Use an https:// address", Toast.LENGTH_LONG).show()
                     return@setOnClickListener
                 }
+                isEnabled = false
+                text = "Waiting for the running sync…"
                 lifecycleScope.launch {
-                    mailbox.reset(url)
+                    // Finish even if the screen goes away meanwhile.
+                    withContext(NonCancellable) { mailbox.reset(url) }
+                    isEnabled = true
+                    text = "Use this server (new pairing)"
                     showQr()
                     Toast.makeText(this@RelayActivity, "New pairing: scan the code again on the iPhone", Toast.LENGTH_LONG).show()
+                    RelayWorker.syncNow(this@RelayActivity)
                 }
             }
         }

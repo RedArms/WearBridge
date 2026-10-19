@@ -191,8 +191,9 @@ class PeripheralManager: NSObject, ObservableObject {
         }
         let data = Data([wakeAlarmState])
         for _ in 0..<5 {
-            // False only while the transmit queue is full.
-            if peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: nil) {
+            // False only while the transmit queue is full; the latest value is then resent when there's room
+            // (and replaces a held "ringing" replay, so a stale one can't restart the watch alarm).
+            if sendUpdate(data, for: characteristic) {
                 let subscribers = characteristic.subscribedCentrals?.count ?? 0
                 logger.info("Wake alarm BLE notify: \(ringing ? "ringing" : "stopped"), \(subscribers) watch(es) subscribed")
                 return subscribers > 0
@@ -334,6 +335,7 @@ class PeripheralManager: NSObject, ObservableObject {
 
     private func setupServices() {
         guard !serviceAdded else { return }
+        pendingUpdates = [:] // held updates point at the old characteristics
 
         statusCharacteristic = CBMutableCharacteristic(
             type: BLEConstants.connectionStatusUUID,

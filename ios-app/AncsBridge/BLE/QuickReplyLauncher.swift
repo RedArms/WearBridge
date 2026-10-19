@@ -15,6 +15,9 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
     private static let urlKey = "wearbridgeShortcutURL"
     /// Shortcut to run once the app is active (a tap on the notification can cold-launch it).
     private var pendingURL: URL?
+    private var pendingSince = Date.distantPast
+    /// A tap that didn't bring the app up must not send the reply on some later, unrelated opening.
+    private static let pendingLifetime: TimeInterval = 60
     private var activeObserver: NSObjectProtocol?
 
     private override init() {
@@ -31,6 +34,7 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
         ) { [weak self] _ in
             guard let self, let url = self.pendingURL else { return }
             self.pendingURL = nil
+            guard Date().timeIntervalSince(self.pendingSince) < Self.pendingLifetime else { return }
             self.open(url)
         }
     }
@@ -117,6 +121,7 @@ final class QuickReplyLauncher: NSObject, UNUserNotificationCenterDelegate {
                 self.open(url)
             } else {
                 self.pendingURL = url
+                self.pendingSince = Date()
             }
         }
     }
