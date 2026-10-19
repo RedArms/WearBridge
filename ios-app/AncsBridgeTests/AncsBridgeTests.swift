@@ -186,5 +186,7 @@ final class RelayMailboxTests: XCTestCase {
         XCTAssertEqual(pairing.topic, "wb-AbC_d-123")
         XCTAssertEqual(pairing.key, key)
         XCTAssertNil(RelayMailbox.parse(try XCTUnwrap(URL(string: "wearbridge://relay?s=https%3A%2F%2Fntfy.sh&t=wb&k=AAAA"))))
+        // Plain http is refused (App Transport Security would block it anyway).
+        XCTAssertNil(RelayMailbox.parse(try XCTUnwrap(URL(string: link.replacingOccurrences(of: "https", with: "http")))))
     }
 }

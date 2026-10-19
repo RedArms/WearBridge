@@ -1,6 +1,6 @@
 # WearBridge (package: com.wearos.ancsbridge)
 
-iPhone → Wear OS notification mirroring via BLE/ANCS. All local, no cloud relay.
+iPhone → Wear OS notification mirroring via BLE/ANCS. All local over Bluetooth; only the optional Samsung relay uses the internet (end-to-end encrypted ntfy mailbox).
 
 **Display Name**: WearBridge (package names unchanged: `com.wearos.ancsbridge`)
 **iOS Bundle ID**: `com.wearos.ancsbridge.companion`

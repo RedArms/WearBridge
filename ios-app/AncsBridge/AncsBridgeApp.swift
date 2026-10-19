@@ -20,7 +20,7 @@ struct AncsBridgeApp: App {
                 .task { QuickReplyLauncher.shared.requestAuthorization() }
                 // Pairing link from the phone relay's QR code: wearbridge://relay?...
                 .onOpenURL { url in
-                    RelayMailbox.shared.pair(with: url)
+                    RelayMailbox.shared.offer(url) // confirmed in ContentView
                 }
         }
         .onChange(of: scenePhase) { _, phase in

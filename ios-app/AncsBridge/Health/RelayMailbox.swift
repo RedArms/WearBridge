@@ -28,6 +28,8 @@ final class RelayMailbox: ObservableObject {
 
     @Published private(set) var pairing: Pairing?
     @Published private(set) var status: String
+    /// A pairing link that was opened (camera, Messages, a web page) and waits for the user to confirm it.
+    @Published private(set) var pendingPairing: Pairing?
 
     private static let aad = Data("wearbridge.relay.v1".utf8)
     private static let kindBatch: UInt8 = 1
@@ -39,34 +41,75 @@ final class RelayMailbox: ObservableObject {
     private enum Keys {
         static let lastMessageId = "relayMailboxLastMessageId"
         static let status = "relayMailboxStatus"
+        static let lastDataAt = "relayMailboxLastDataAt"
     }
 
     private let logger = Logger(subsystem: "com.wearos.ancsbridge", category: "RelayMailbox")
     private let defaults = UserDefaults.standard
     private var isFetching = false
     private var lastFetch: Date?
+    private var protectedDataObserver: NSObjectProtocol?
+
+    /// Dedicated session: no cache or cookies, and short timeouts so a check fits in a background wake.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 15
+        return URLSession(configuration: configuration)
+    }()
 
     private init() {
         pairing = Keychain.loadPairing()
         status = UserDefaults.standard.string(forKey: Keys.status) ?? ""
+        // Before the first unlock after a reboot the Keychain can't be read; try again once it can.
+        protectedDataObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.currentPairing() }
+        }
+    }
+
+    /// The pairing, re-read from the Keychain if it couldn't be read before (locked at launch).
+    @MainActor
+    private func currentPairing() -> Pairing? {
+        if pairing == nil, let stored = Keychain.loadPairing() {
+            pairing = stored
+        }
+        return pairing
     }
 
     // MARK: - Pairing
 
-    /// Pairs with the relay from its link (wearbridge://relay?...), scanned or pasted.
+    /// A relay link was opened from outside the app (camera, Messages, a web page):
+    /// keep it until the user confirms, so a stray link can't replace the real relay.
+    @MainActor
+    func offer(_ url: URL) {
+        guard let offered = Self.parse(url) else {
+            logger.error("Not a WearBridge relay link")
+            setStatus("That link isn't a valid relay pairing link (it must use https)")
+            return
+        }
+        guard offered != currentPairing() else { return } // already paired with it
+        pendingPairing = offered
+    }
+
+    @MainActor
+    func cancelPendingPairing() {
+        pendingPairing = nil
+    }
+
+    /// Pairs with the relay the user confirmed.
     @discardableResult
     @MainActor
-    func pair(with url: URL) -> Bool {
-        guard let pairing = Self.parse(url) else {
-            logger.error("Not a WearBridge relay link")
-            return false
-        }
+    func pair(with pairing: Pairing) -> Bool {
+        pendingPairing = nil
         guard Keychain.save(pairing) else {
             setStatus("Couldn't save the relay pairing")
             return false
         }
         self.pairing = pairing
         defaults.removeObject(forKey: Keys.lastMessageId)
+        defaults.removeObject(forKey: Keys.lastDataAt)
         setStatus("Paired with the relay")
         Task { await fetch(reason: "paired") }
         return true
@@ -77,6 +120,7 @@ final class RelayMailbox: ObservableObject {
         Keychain.deletePairing()
         pairing = nil
         defaults.removeObject(forKey: Keys.lastMessageId)
+        defaults.removeObject(forKey: Keys.lastDataAt)
         setStatus("")
     }
 
@@ -84,8 +128,9 @@ final class RelayMailbox: ObservableObject {
         guard url.scheme == "wearbridge", url.host == "relay",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        // https only: App Transport Security blocks plain http anyway.
         guard let serverText = value("s"), let server = URL(string: serverText),
-              server.scheme == "https" || server.scheme == "http",
+              server.scheme == "https", server.host?.isEmpty == false,
               let topic = value("t"), topic.range(of: "^[-_A-Za-z0-9]{1,60}$", options: .regularExpression) != nil,
               let keyText = value("k"), let key = Data(base64URLEncoded: keyText), key.count == 32
         else { return nil }
@@ -104,16 +149,25 @@ final class RelayMailbox: ObservableObject {
     /// Polls the mailbox, stages new batches for Apple Health and acknowledges them.
     @MainActor
     func fetch(reason: String) async {
-        guard let pairing, SettingsStore.isHealthSyncEnabled(), !isFetching else { return }
+        guard let pairing = currentPairing(), !isFetching else { return }
+        guard SettingsStore.isHealthSyncEnabled() else {
+            setStatus("Apple Health sync is off (above): relay data waits on the relay phone")
+            return
+        }
         isFetching = true
         lastFetch = Date()
-        // A BLE or refresh wake only gives a few seconds; ask for a little more.
-        let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "RelayMailbox")
-        defer {
-            isFetching = false
-            if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
-        }
+        defer { isFetching = false }
 
+        // A BLE or refresh wake only gives a few seconds; ask for more, and stop cleanly
+        // if iOS wants the time back (nothing acknowledged yet means nothing is lost).
+        let work = Task { @MainActor in await self.receive(pairing, reason: reason) }
+        let assertion = BackgroundAssertion.begin(name: "RelayMailbox") { work.cancel() }
+        await work.value
+        assertion.end()
+    }
+
+    @MainActor
+    private func receive(_ pairing: Pairing, reason: String) async {
         do {
             let since = defaults.string(forKey: Keys.lastMessageId) ?? "all"
             let messages = try await poll(pairing, topic: pairing.topic, since: since)
@@ -138,21 +192,57 @@ final class RelayMailbox: ObservableObject {
                 defaults.set(lastId, forKey: Keys.lastMessageId)
             }
             if recordCount > 0 {
+                defaults.set(Date().timeIntervalSince1970, forKey: Keys.lastDataAt)
                 HealthKitWriter.shared.flush()
             }
             let time = Date().formatted(date: .omitted, time: .shortened)
-            setStatus(recordCount > 0 ? "Last check \(time): \(recordCount) records received" : "Last check \(time): nothing new")
+            setStatus(recordCount > 0
+                      ? "Last check \(time): \(recordCount) records received"
+                      : "Last check \(time): nothing new\(lastDataNote)")
             logger.info("Mailbox (\(reason)): \(received.count) batches, \(recordCount) records")
         } catch {
-            setStatus("Last check failed: \(error.localizedDescription)")
+            if Task.isCancelled {
+                setStatus("Last check interrupted; will retry")
+            } else {
+                setStatus("Last check failed: \(error.localizedDescription)")
+            }
             logger.error("Mailbox fetch failed (\(reason)): \(error.localizedDescription)")
+        }
+    }
+
+    /// " · last data <date>" when something ever arrived.
+    private var lastDataNote: String {
+        let seconds = defaults.double(forKey: Keys.lastDataAt)
+        guard seconds > 0 else { return "" }
+        return " · last data \(Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    /// A UIKit background task that ends exactly once, whether the work finishes or iOS expires it.
+    private final class BackgroundAssertion: @unchecked Sendable {
+        private var id: UIBackgroundTaskIdentifier = .invalid
+
+        @MainActor
+        static func begin(name: String, onExpiry: @escaping @Sendable () -> Void) -> BackgroundAssertion {
+            let assertion = BackgroundAssertion()
+            assertion.id = UIApplication.shared.beginBackgroundTask(withName: name) {
+                onExpiry()
+                assertion.end()
+            }
+            return assertion
+        }
+
+        @MainActor
+        func end() {
+            guard id != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
         }
     }
 
     // MARK: - Background refresh
 
     func scheduleRefresh() {
-        guard pairing != nil else { return }
+        guard pairing != nil || Keychain.loadPairing() != nil else { return }
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: Self.refreshInterval)
         do {
@@ -192,7 +282,7 @@ final class RelayMailbox: ObservableObject {
         )
         components?.queryItems = [URLQueryItem(name: "poll", value: "1"), URLQueryItem(name: "since", value: since)]
         guard let url = components?.url else { throw URLError(.badURL) }
-        let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 20))
+        let (data, response) = try await Self.session.data(for: URLRequest(url: url))
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200 else { throw MailboxError.http(code) }
         let decoder = JSONDecoder()
@@ -203,11 +293,11 @@ final class RelayMailbox: ObservableObject {
     }
 
     private func post(_ pairing: Pairing, topic: String, text: String) async throws {
-        var request = URLRequest(url: pairing.server.appendingPathComponent(topic), timeoutInterval: 20)
+        var request = URLRequest(url: pairing.server.appendingPathComponent(topic))
         request.httpMethod = "POST"
         request.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(text.utf8)
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await Self.session.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else { throw MailboxError.http(code) }
     }

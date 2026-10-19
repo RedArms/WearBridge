@@ -96,7 +96,7 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                         Button("Paste relay link") {
                             if let text = UIPasteboard.general.string, let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                                relayMailbox.pair(with: url)
+                                relayMailbox.offer(url)
                             }
                         }
                     }
